@@ -29,8 +29,12 @@ CORS(app, resources={r"/api/*": {"origins": cors_origins, "methods": ["GET", "PO
 app.register_blueprint(luwes_bp)
 
 # ── Config ────────────────────────────────────────────────────
-DB_PATH       = os.getenv('DATABASE_PATH', 'data/tpxo_seribu.db')
-LUWES_DB_PATH = os.getenv('LUWES_DB_PATH', 'data/luwes_raw.db')
+# DATABASE_PATH: SQLite TPXO
+DB_PATH = os.getenv('DATABASE_PATH', 'data/tpxo_seribu.db')
+
+# LUWES_DB_PATH digunakan oleh render.yaml & .env
+# Fallback ke LUWES_RAW_DB_PATH agar kompatibel dengan .env.example lama
+LUWES_DB_PATH = os.getenv('LUWES_DB_PATH') or os.getenv('LUWES_RAW_DB_PATH', 'data/luwes_raw.db')
 
 # ── Init Luwes DB ─────────────────────────────────────────────
 init_db(LUWES_DB_PATH)
@@ -43,8 +47,9 @@ print(f"  Luwes DB      : {LUWES_DB_PATH}")
 print(f"  CORS Origins  : {cors_origins}")
 
 # ── Scheduler ─────────────────────────────────────────────────
-_werkzeug_reloader_child = os.environ.get('WERKZEUG_RUN_MAIN') == 'false'
-if not _werkzeug_reloader_child:
+# Hindari double-start saat Werkzeug reloader aktif
+_is_reloader_child = os.environ.get('WERKZEUG_RUN_MAIN') == 'false'
+if not _is_reloader_child:
     start_scheduler(db_path=LUWES_DB_PATH)
     print(f"  Luwes Scheduler : aktif (fetch setiap 60s)")
 
