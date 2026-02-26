@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Environment variables
+.env
+*.env
+
+# Database files — JANGAN di-commit ke git
+# (akan disimpan di Render Persistent Disk /data/)
+data/*.db
+data/*.sqlite
+*.db
+*.sqlite
+
+# Data besar
+data/*.nc
+data/*.mat
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
