@@ -1,0 +1,35 @@
+[build]
+builder = "nixpacks"
+buildCommand = "pip install -r requirements.txt"
+
+[deploy]
+startCommand = "gunicorn api.app:app --bind 0.0.0.0:$PORT --workers 1 --threads 2 --timeout 120"
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3
+```
+
+**`backend/Procfile`** (baru)
+```
+web: gunicorn api.app:app --bind 0.0.0.0:$PORT --workers 1 --threads 2 --timeout 120
+```
+
+**`backend/runtime.txt`** (baru)
+```
+python-3.11.0
+```
+
+**`backend/.railwayignore`** (baru)
+```
+data/*.nc
+data/*.mat
+data/*.db
+venv/
+__pycache__/
+*.pyc
+```
+
+---
+
+**`backend/requirements.txt`** — tambah satu baris di akhir:
+```
+psutil==5.9.8
