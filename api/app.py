@@ -76,17 +76,25 @@ app.register_blueprint(luwes_bp)
 app.register_blueprint(auth_bp)
 app.register_blueprint(s104_bp)
 
-DATA_DIR      = os.getenv("DATA_DIR", "/data")
-_local_data   = str(Path(__file__).parent.parent / "data")
+# ── Config ────────────────────────────────────────────────────────────────────
+# Lokasi file statis tpxo_seribu.db di dalam repo (/app/data/ di Railway)
+_repo_data = Path(__file__).parent.parent / "data"
 
-DB_PATH       = os.getenv("DATABASE_PATH",
-                    f"{DATA_DIR}/tpxo_seribu.db" if os.path.exists(DATA_DIR)
-                    else f"{_local_data}/tpxo_seribu.db")
-LUWES_DB_PATH = os.getenv("LUWES_DB_PATH",  f"{DATA_DIR}/luwes_raw.db")
-AUTH_DB_PATH  = os.getenv("AUTH_DB_PATH",   f"{DATA_DIR}/auth.db")
-LUWES_IMEI    = os.getenv("LUWES_IMEI",     "869556066101370")
+# Prioritas DATABASE_PATH:
+#   1. Env var DATABASE_PATH (set manual di Railway jika mau override)
+#   2. /app/data/tpxo_seribu.db (dari repo, selalu ada setelah commit)
+DB_PATH = os.getenv(
+    "DATABASE_PATH",
+    str(_repo_data / "tpxo_seribu.db")
+)
 
-os.makedirs(DATA_DIR, exist_ok=True)
+# Luwes & Auth DB disimpan di Volume /data agar persisten antar deploy
+_volume_data = os.getenv("DATA_DIR", "/data")
+os.makedirs(_volume_data, exist_ok=True)
+
+LUWES_DB_PATH = os.getenv("LUWES_DB_PATH", f"{_volume_data}/luwes_raw.db")
+AUTH_DB_PATH  = os.getenv("AUTH_DB_PATH",  f"{_volume_data}/auth.db")
+LUWES_IMEI    = os.getenv("LUWES_IMEI",    "869556066101370")
 
 # ── Init Databases ────────────────────────────────────────────────────────────
 init_db(LUWES_DB_PATH)
@@ -114,13 +122,25 @@ predictor = TPXOPredictor(DB_PATH)
 try:
     predictor.connect()
     print("  ✅  Database TPXO terkoneksi")
+except FileNotFoundError as e:
+    # Jangan crash — server tetap berjalan, endpoint tide akan return 503
+    logger.error(f"Database TPXO tidak ditemukan: {e}")
+    print(f"  ❌  Database TPXO tidak ditemukan: {DB_PATH}")
+    print("       Pastikan data/tpxo_seribu.db sudah di-commit ke repo.")
+    predictor = None
 except Exception as e:
+    logger.error(f"Gagal koneksi database TPXO: {e}", exc_info=True)
     print(f"  ❌  Gagal koneksi database TPXO: {e}")
-    raise
+    predictor = None
 
-# ── Setup S-104 (butuh predictor sudah connect) ───────────────────────────────
-setup_s104(predictor, LUWES_DB_PATH, LUWES_IMEI)
-print("  ✅  S-104 exporter siap (IHO S-104 Ed.2.0.0)")
+# ── Setup S-104 ────────────────────────────────────────────────────────────────
+if predictor is not None:
+    setup_s104(predictor, LUWES_DB_PATH, LUWES_IMEI)
+    print("  ✅  S-104 exporter siap (IHO S-104 Ed.2.0.0)")
+else:
+    setup_s104(None, LUWES_DB_PATH, LUWES_IMEI)
+    print("  ⚠️   S-104 exporter nonaktif (database TPXO tidak tersedia)")
+
 print("=" * 65)
 
 
@@ -133,48 +153,26 @@ def index():
         "name":    "Searibu Marine Information API",
         "version": "2.2.0",
         "model":   "TPXO9-atlas-v5",
+        "tpxo_ready": predictor is not None,
         "standards": {
             "S-100": "IHO Universal Hydrographic Data Model Ed.5.2.0",
             "S-104": "Water Level Information for Surface Navigation Ed.2.0.0",
         },
         "endpoints": {
-            # ── System ──────────────────────────────────────────────────
-            "GET  /api/health":
-                "Health check — status DB dan jumlah grid/harmonik",
-
-            # ── Tidal Prediction ─────────────────────────────────────────
-            "GET  /api/tide/prediction":
-                "?lon=&lat=&start_date=&end_date=&interval_hours= → prediksi pasut TPXO9",
-
-            # ── Luwes ────────────────────────────────────────────────────
-            "GET  /api/luwes/level":
-                "Data water level terbaru dari stasiun Luwes",
-            "GET  /api/luwes/history":
-                "?start=YYYY-MM-DD&end=YYYY-MM-DD → history water level",
-            "GET  /api/luwes/status":
-                "Status scheduler + statistik database Luwes",
-            "POST /api/luwes/fetch":
-                "Trigger manual fetch dari Luwes API",
-            "GET  /api/luwes/overlay":
-                "?date=&lon=&lat= → Luwes RAW + prediksi TPXO overlay",
-
-            # ── Auth ──────────────────────────────────────────────────────
-            "POST /api/auth/register":
-                "{ full_name, email, password } → registrasi user baru",
-            "POST /api/auth/login":
-                "{ email, password } → login",
-
-            # ── IHO S-104 ────────────────────────────────────────────────
-            "GET  /api/s104/export":
-                "?lon=&lat=&date= → unduh HDF5 S-104 Ed.2.0.0 (TPXO, dataDynamicity=1)",
-            "GET  /api/s104/export/luwes":
-                "?date=&apply_tol= → unduh HDF5 S-104 (Luwes, dataDynamicity=3)",
-            "GET  /api/s104/json":
-                "?lon=&lat=&date= → preview JSON S-104 untuk frontend",
-            "GET  /api/s104/metadata":
-                "Informasi compliance S-100/S-104 sistem Searibu",
-            "GET  /api/s104/validate":
-                "?path= → validasi struktur file HDF5 S-104",
+            "GET  /api/health":             "Health check",
+            "GET  /api/tide/prediction":    "?lon=&lat=&start_date=&end_date=&interval_hours=",
+            "GET  /api/luwes/level":        "Data water level terbaru",
+            "GET  /api/luwes/history":      "?start=YYYY-MM-DD&end=YYYY-MM-DD",
+            "GET  /api/luwes/status":       "Status scheduler + statistik DB",
+            "POST /api/luwes/fetch":        "Trigger manual fetch",
+            "GET  /api/luwes/overlay":      "?date=&lon=&lat=",
+            "POST /api/auth/register":      "{ full_name, email, password }",
+            "POST /api/auth/login":         "{ email, password }",
+            "GET  /api/s104/export":        "?lon=&lat=&date= → HDF5 TPXO",
+            "GET  /api/s104/export/luwes":  "?date= → HDF5 Luwes",
+            "GET  /api/s104/json":          "?lon=&lat=&date= → JSON preview",
+            "GET  /api/s104/metadata":      "S-100/S-104 compliance info",
+            "GET  /api/s104/validate":      "?path= → validasi HDF5",
         },
         "docs": "/api/openapi",
     })
@@ -185,6 +183,15 @@ def index():
 # ─────────────────────────────────────────────────────────────────────────────
 @app.route("/api/health")
 def health():
+    if predictor is None:
+        return jsonify({
+            "status":  "degraded",
+            "version": "2.2.0",
+            "message": "Database TPXO tidak tersedia. Commit data/tpxo_seribu.db ke repo.",
+            "luwes_scheduler": "running",
+            "auth_db": "ok",
+        }), 200
+
     try:
         cursor = predictor.conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM grid_points")
@@ -192,11 +199,11 @@ def health():
         cursor.execute("SELECT COUNT(*) FROM harmonic_constants")
         harm_count = cursor.fetchone()[0]
         return jsonify({
-            "status":              "healthy",
-            "version":             "2.2.0",
-            "grid_points":         grid_count,
-            "harmonic_constants":  harm_count,
-            "s104_ready":          True,
+            "status":             "healthy",
+            "version":            "2.2.0",
+            "grid_points":        grid_count,
+            "harmonic_constants": harm_count,
+            "s104_ready":         True,
             "standards": {
                 "S-100": "Ed.5.2.0",
                 "S-104": "Ed.2.0.0",
@@ -207,11 +214,10 @@ def health():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ROUTE: OpenAPI docs endpoint (serve openapi.yaml as JSON)
+# ROUTE: OpenAPI docs
 # ─────────────────────────────────────────────────────────────────────────────
 @app.route("/api/openapi")
 def openapi_spec():
-    """Serve OpenAPI 3.0 specification."""
     try:
         import yaml
         spec_path = Path(__file__).parent.parent / "openapi.yaml"
@@ -219,13 +225,11 @@ def openapi_spec():
             with open(spec_path, "r") as f:
                 spec = yaml.safe_load(f)
             return jsonify(spec)
-        else:
-            return jsonify({"error": "openapi.yaml not found"}), 404
+        return jsonify({"error": "openapi.yaml not found"}), 404
     except ImportError:
-        # PyYAML tidak tersedia — kembalikan info saja
         return jsonify({
-            "info": "OpenAPI 3.0 spec tersedia di backend/openapi.yaml",
-            "hint": "Install PyYAML: pip install pyyaml"
+            "info": "OpenAPI spec tersedia di backend/openapi.yaml",
+            "hint": "pip install pyyaml"
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -236,20 +240,12 @@ def openapi_spec():
 # ─────────────────────────────────────────────────────────────────────────────
 @app.route("/api/tide/prediction")
 def get_tide_prediction():
-    """
-    Prediksi pasang surut TPXO9-atlas-v5 (15 konstituen harmonik).
+    if predictor is None:
+        return jsonify({
+            "error": "Database TPXO tidak tersedia. Hubungi administrator."
+        }), 503
 
-    Query params:
-      lon            : longitude WGS84 (wajib)
-      lat            : latitude WGS84 (wajib)
-      start_date     : YYYY-MM-DD (default: hari ini UTC)
-      end_date       : YYYY-MM-DD (default: start + 7 hari)
-      interval_hours : 1 | 3 | 6 (default: 1)
-
-    Datum vertikal output: MSL (Mean Sea Level) — sesuai S-104 §8.4
-    """
     try:
-        # ── Parse parameters ───────────────────────────────────────────
         lon = request.args.get("lon", type=float)
         lat = request.args.get("lat", type=float)
 
@@ -262,9 +258,9 @@ def get_tide_prediction():
         if not (-90 <= lat <= 90):
             return jsonify({"error": "lat harus antara -90 dan 90"}), 400
 
+        from datetime import timedelta
         now_utc = datetime.now(timezone.utc)
 
-        # start_date
         start_date_str = request.args.get("start_date")
         if start_date_str:
             start_dt = _parse_date(start_date_str)
@@ -273,8 +269,6 @@ def get_tide_prediction():
         else:
             start_dt = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
 
-        # end_date
-        from datetime import timedelta
         end_date_str = request.args.get("end_date")
         if end_date_str:
             end_dt = _parse_date(end_date_str)
@@ -283,15 +277,8 @@ def get_tide_prediction():
         else:
             end_dt = start_dt + timedelta(days=7)
 
-        # Batas waktu
-        min_allowed = now_utc.replace(
-            year=now_utc.year - 1,
-            hour=0, minute=0, second=0, microsecond=0,
-        )
-        max_allowed = now_utc.replace(
-            year=now_utc.year + 2,
-            hour=23, minute=59, second=59, microsecond=0,
-        )
+        min_allowed = now_utc.replace(year=now_utc.year - 1, hour=0, minute=0, second=0, microsecond=0)
+        max_allowed = now_utc.replace(year=now_utc.year + 2, hour=23, minute=59, second=59, microsecond=0)
 
         if start_dt < min_allowed:
             return jsonify({"error": f"start_date terlalu jauh ke belakang (min: {min_allowed.date()})"}), 400
@@ -302,12 +289,10 @@ def get_tide_prediction():
         if (end_dt - start_dt).days > 366:
             return jsonify({"error": "Rentang maksimum 366 hari per request"}), 400
 
-        # interval_hours
         interval_hours = request.args.get("interval_hours", default=1, type=int)
         if interval_hours not in (1, 3, 6):
             return jsonify({"error": "interval_hours harus 1, 3, atau 6"}), 400
 
-        # ── Execute prediction ─────────────────────────────────────────
         result = predictor.predict(
             lon=lon, lat=lat,
             start_dt=start_dt, end_dt=end_dt,
@@ -326,7 +311,6 @@ def get_tide_prediction():
 # Helper
 # ─────────────────────────────────────────────────────────────────────────────
 def _parse_date(s: str):
-    """Parse string tanggal ke datetime UTC."""
     for fmt in ["%Y-%m-%d", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S"]:
         try:
             return datetime.strptime(s, fmt).replace(tzinfo=timezone.utc)
@@ -342,11 +326,9 @@ def _parse_date(s: str):
 def not_found(e):
     return jsonify({"error": "Endpoint tidak ditemukan"}), 404
 
-
 @app.errorhandler(405)
 def method_not_allowed(e):
     return jsonify({"error": "Method tidak diizinkan"}), 405
-
 
 @app.errorhandler(500)
 def internal_error(e):
@@ -360,6 +342,4 @@ if __name__ == "__main__":
     port  = int(os.getenv("PORT", 5000))
     debug = os.getenv("FLASK_DEBUG", "False").lower() == "true"
     print(f"\n🚀  Server berjalan di http://localhost:{port}")
-    print(f"📄  OpenAPI spec  : http://localhost:{port}/api/openapi")
-    print(f"📦  S-104 export  : http://localhost:{port}/api/s104/export?lon=106.58&lat=-5.60&date=2026-03-18\n")
     app.run(host="0.0.0.0", port=port, debug=debug)

@@ -1,6 +1,8 @@
 data/*.nc
 data/*.mat
-data/*.db
+data/luwes_raw.db
+data/auth.db
 venv/
 __pycache__/
 *.pyc
+*.pyo
