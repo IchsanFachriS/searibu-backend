@@ -76,14 +76,16 @@ app.register_blueprint(luwes_bp)
 app.register_blueprint(auth_bp)
 app.register_blueprint(s104_bp)
 
-# ── Config ────────────────────────────────────────────────────────────────────
-DATA_DIR       = os.getenv("DATA_DIR", "/data")
-DB_PATH        = os.getenv("DATABASE_PATH",   f"{DATA_DIR}/tpxo_seribu.db")
-LUWES_DB_PATH  = os.getenv("LUWES_DB_PATH",   f"{DATA_DIR}/luwes_raw.db")
-AUTH_DB_PATH   = os.getenv("AUTH_DB_PATH",    f"{DATA_DIR}/auth.db")
-LUWES_IMEI     = os.getenv("LUWES_IMEI",      "869556066101370")
+DATA_DIR      = os.getenv("DATA_DIR", "/data")
+_local_data   = str(Path(__file__).parent.parent / "data")
 
-# Pastikan /data directory ada (Railway Volume kadang butuh ini)
+DB_PATH       = os.getenv("DATABASE_PATH",
+                    f"{DATA_DIR}/tpxo_seribu.db" if os.path.exists(DATA_DIR)
+                    else f"{_local_data}/tpxo_seribu.db")
+LUWES_DB_PATH = os.getenv("LUWES_DB_PATH",  f"{DATA_DIR}/luwes_raw.db")
+AUTH_DB_PATH  = os.getenv("AUTH_DB_PATH",   f"{DATA_DIR}/auth.db")
+LUWES_IMEI    = os.getenv("LUWES_IMEI",     "869556066101370")
+
 os.makedirs(DATA_DIR, exist_ok=True)
 
 # ── Init Databases ────────────────────────────────────────────────────────────
