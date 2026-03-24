@@ -77,7 +77,6 @@ app.register_blueprint(auth_bp)
 app.register_blueprint(s104_bp)
 
 # ── Config ────────────────────────────────────────────────────────────────────
-# ── Config ── (GANTI bagian ini)
 DATA_DIR       = os.getenv("DATA_DIR", "/data")
 DB_PATH        = os.getenv("DATABASE_PATH",   f"{DATA_DIR}/tpxo_seribu.db")
 LUWES_DB_PATH  = os.getenv("LUWES_DB_PATH",   f"{DATA_DIR}/luwes_raw.db")

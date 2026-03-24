@@ -1,0 +1,6 @@
+data/*.nc
+data/*.mat
+data/*.db
+venv/
+__pycache__/
+*.pyc
