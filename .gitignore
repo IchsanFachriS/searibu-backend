@@ -18,13 +18,6 @@ env/
 .env
 *.env
 
-# Database files — JANGAN di-commit ke git
-# (akan disimpan di Render Persistent Disk /data/)
-data/*.db
-data/*.sqlite
-*.db
-*.sqlite
-
 # Data besar
 data/*.nc
 data/*.mat
