@@ -5,7 +5,8 @@ Backend utama sistem Searibu
 Endpoints:
   GET  /                          → API index
   GET  /api/health                → Health check
-  GET  /api/tide/prediction       → Prediksi pasut TPXO9
+  GET  /api/tide/prediction       → Prediksi pasut TPXO9 (jam atau menit)
+  GET  /api/tide/prediction/minute → Prediksi per menit (1 hari saja)
   GET  /api/luwes/level           → Data terbaru stasiun Luwes
   GET  /api/luwes/history         → History water level
   GET  /api/luwes/status          → Status scheduler
@@ -19,6 +20,11 @@ Endpoints:
   GET  /api/s104/metadata         → S-100/S-104 compliance info
   GET  /api/s104/validate         → Validasi file HDF5 S-104
 
+Perubahan:
+  - /api/tide/prediction menerima parameter interval_minutes (1–60)
+  - /api/tide/prediction/minute endpoint khusus per-menit (1 hari, dioptimalkan)
+  - Rentang maksimum diperluas: 5 tahun untuk interval jam, 1 hari untuk per menit
+
 Standar:
   IHO S-100 Universal Hydrographic Data Model Ed.5.2.0 (2024)
   IHO S-104 Water Level Information for Surface Navigation Ed.2.0.0 (2024)
@@ -27,7 +33,7 @@ Standar:
 import os
 import sys
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from flask import Flask, jsonify, request
@@ -77,18 +83,9 @@ app.register_blueprint(auth_bp)
 app.register_blueprint(s104_bp)
 
 # ── Config ────────────────────────────────────────────────────────────────────
-# Lokasi file statis tpxo_seribu.db di dalam repo (/app/data/ di Railway)
 _repo_data = Path(__file__).parent.parent / "data"
+DB_PATH = os.getenv("DATABASE_PATH", str(_repo_data / "tpxo_seribu.db"))
 
-# Prioritas DATABASE_PATH:
-#   1. Env var DATABASE_PATH (set manual di Railway jika mau override)
-#   2. /app/data/tpxo_seribu.db (dari repo, selalu ada setelah commit)
-DB_PATH = os.getenv(
-    "DATABASE_PATH",
-    str(_repo_data / "tpxo_seribu.db")
-)
-
-# Luwes & Auth DB disimpan di Volume /data agar persisten antar deploy
 _volume_data = os.getenv("DATA_DIR", "/data")
 os.makedirs(_volume_data, exist_ok=True)
 
@@ -104,7 +101,7 @@ init_auth_db(AUTH_DB_PATH)
 setup_auth(AUTH_DB_PATH)
 
 print("=" * 65)
-print("  Searibu — TPXO Tide Prediction API  v2.2.0")
+print("  Searibu — TPXO Tide Prediction API  v2.3.0")
 print(f"  TPXO Database  : {DB_PATH}")
 print(f"  Luwes DB       : {LUWES_DB_PATH}")
 print(f"  Auth DB        : {AUTH_DB_PATH}")
@@ -123,10 +120,8 @@ try:
     predictor.connect()
     print("  ✅  Database TPXO terkoneksi")
 except FileNotFoundError as e:
-    # Jangan crash — server tetap berjalan, endpoint tide akan return 503
     logger.error(f"Database TPXO tidak ditemukan: {e}")
     print(f"  ❌  Database TPXO tidak ditemukan: {DB_PATH}")
-    print("       Pastikan data/tpxo_seribu.db sudah di-commit ke repo.")
     predictor = None
 except Exception as e:
     logger.error(f"Gagal koneksi database TPXO: {e}", exc_info=True)
@@ -151,7 +146,7 @@ print("=" * 65)
 def index():
     return jsonify({
         "name":    "Searibu Marine Information API",
-        "version": "2.2.0",
+        "version": "2.3.0",
         "model":   "TPXO9-atlas-v5",
         "tpxo_ready": predictor is not None,
         "standards": {
@@ -159,20 +154,21 @@ def index():
             "S-104": "Water Level Information for Surface Navigation Ed.2.0.0",
         },
         "endpoints": {
-            "GET  /api/health":             "Health check",
-            "GET  /api/tide/prediction":    "?lon=&lat=&start_date=&end_date=&interval_hours=",
-            "GET  /api/luwes/level":        "Data water level terbaru",
-            "GET  /api/luwes/history":      "?start=YYYY-MM-DD&end=YYYY-MM-DD",
-            "GET  /api/luwes/status":       "Status scheduler + statistik DB",
-            "POST /api/luwes/fetch":        "Trigger manual fetch",
-            "GET  /api/luwes/overlay":      "?date=&lon=&lat=",
-            "POST /api/auth/register":      "{ full_name, email, password }",
-            "POST /api/auth/login":         "{ email, password }",
-            "GET  /api/s104/export":        "?lon=&lat=&date= → HDF5 TPXO",
-            "GET  /api/s104/export/luwes":  "?date= → HDF5 Luwes",
-            "GET  /api/s104/json":          "?lon=&lat=&date= → JSON preview",
-            "GET  /api/s104/metadata":      "S-100/S-104 compliance info",
-            "GET  /api/s104/validate":      "?path= → validasi HDF5",
+            "GET  /api/health":                   "Health check",
+            "GET  /api/tide/prediction":           "?lon=&lat=&start_date=&end_date=&interval_hours= | &interval_minutes=",
+            "GET  /api/tide/prediction/minute":    "?lon=&lat=&date= → per-menit 1 hari (1440 titik)",
+            "GET  /api/luwes/level":               "Data water level terbaru",
+            "GET  /api/luwes/history":             "?start=YYYY-MM-DD&end=YYYY-MM-DD",
+            "GET  /api/luwes/status":              "Status scheduler + statistik DB",
+            "POST /api/luwes/fetch":               "Trigger manual fetch",
+            "GET  /api/luwes/overlay":             "?date=&lon=&lat=",
+            "POST /api/auth/register":             "{ full_name, email, password }",
+            "POST /api/auth/login":                "{ email, password }",
+            "GET  /api/s104/export":               "?lon=&lat=&date= → HDF5 TPXO",
+            "GET  /api/s104/export/luwes":         "?date= → HDF5 Luwes",
+            "GET  /api/s104/json":                 "?lon=&lat=&date= → JSON preview",
+            "GET  /api/s104/metadata":             "S-100/S-104 compliance info",
+            "GET  /api/s104/validate":             "?path= → validasi HDF5",
         },
         "docs": "/api/openapi",
     })
@@ -186,7 +182,7 @@ def health():
     if predictor is None:
         return jsonify({
             "status":  "degraded",
-            "version": "2.2.0",
+            "version": "2.3.0",
             "message": "Database TPXO tidak tersedia. Commit data/tpxo_seribu.db ke repo.",
             "luwes_scheduler": "running",
             "auth_db": "ok",
@@ -200,10 +196,14 @@ def health():
         harm_count = cursor.fetchone()[0]
         return jsonify({
             "status":             "healthy",
-            "version":            "2.2.0",
+            "version":            "2.3.0",
             "grid_points":        grid_count,
             "harmonic_constants": harm_count,
             "s104_ready":         True,
+            "features": {
+                "per_minute_prediction": True,
+                "max_range_years":       5,
+            },
             "standards": {
                 "S-100": "Ed.5.2.0",
                 "S-104": "Ed.2.0.0",
@@ -236,29 +236,63 @@ def openapi_spec():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ROUTE: Tide Prediction
+# HELPER: parse date string
+# ─────────────────────────────────────────────────────────────────────────────
+def _parse_date(s: str):
+    for fmt in ["%Y-%m-%d", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S"]:
+        try:
+            return datetime.strptime(s, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HELPER: validasi lon/lat
+# ─────────────────────────────────────────────────────────────────────────────
+def _validate_lonlat(lon, lat):
+    """Return (lon, lat, error_response_or_None)."""
+    if lon is None:
+        return None, None, ({"error": "Parameter lon diperlukan"}, 400)
+    if lat is None:
+        return None, None, ({"error": "Parameter lat diperlukan"}, 400)
+    if not (-180 <= lon <= 180):
+        return None, None, ({"error": "lon harus antara -180 dan 180"}, 400)
+    if not (-90 <= lat <= 90):
+        return None, None, ({"error": "lat harus antara -90 dan 90"}, 400)
+    return lon, lat, None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ROUTE: Tide Prediction (jam atau menit, hingga 5 tahun)
 # ─────────────────────────────────────────────────────────────────────────────
 @app.route("/api/tide/prediction")
 def get_tide_prediction():
+    """
+    Prediksi pasut TPXO9.
+
+    Parameter:
+      lon           : longitude (float, wajib)
+      lat           : latitude  (float, wajib)
+      start_date    : YYYY-MM-DD (default hari ini)
+      end_date      : YYYY-MM-DD (default 7 hari dari start)
+      interval_hours: 1, 3, atau 6 (default 1) — diabaikan jika interval_minutes diset
+      interval_minutes: 1–60 — jika diset, menggantikan interval_hours
+
+    Batasan:
+      - interval_hours  : rentang maks 5 tahun (1826 hari)
+      - interval_minutes: rentang maks 1 hari (gunakan /minute untuk kemudahan)
+    """
     if predictor is None:
-        return jsonify({
-            "error": "Database TPXO tidak tersedia. Hubungi administrator."
-        }), 503
+        return jsonify({"error": "Database TPXO tidak tersedia. Hubungi administrator."}), 503
 
     try:
         lon = request.args.get("lon", type=float)
         lat = request.args.get("lat", type=float)
+        lon, lat, err = _validate_lonlat(lon, lat)
+        if err:
+            return jsonify(err[0]), err[1]
 
-        if lon is None:
-            return jsonify({"error": "Parameter lon diperlukan"}), 400
-        if lat is None:
-            return jsonify({"error": "Parameter lat diperlukan"}), 400
-        if not (-180 <= lon <= 180):
-            return jsonify({"error": "lon harus antara -180 dan 180"}), 400
-        if not (-90 <= lat <= 90):
-            return jsonify({"error": "lat harus antara -90 dan 90"}), 400
-
-        from datetime import timedelta
         now_utc = datetime.now(timezone.utc)
 
         start_date_str = request.args.get("start_date")
@@ -277,26 +311,44 @@ def get_tide_prediction():
         else:
             end_dt = start_dt + timedelta(days=7)
 
-        min_allowed = now_utc.replace(year=now_utc.year - 1, hour=0, minute=0, second=0, microsecond=0)
-        max_allowed = now_utc.replace(year=now_utc.year + 2, hour=23, minute=59, second=59, microsecond=0)
+        # Cek apakah per-menit diminta
+        interval_minutes = request.args.get("interval_minutes", type=int)
+        interval_hours   = request.args.get("interval_hours", default=1, type=int)
 
+        if interval_minutes is not None:
+            # Per-menit: validasi ketat
+            if interval_minutes < 1 or interval_minutes > 60:
+                return jsonify({"error": "interval_minutes harus antara 1 dan 60"}), 400
+            max_days = 31   # max 31 hari untuk per-menit via endpoint ini
+            if (end_dt - start_dt).days > max_days:
+                return jsonify({
+                    "error": f"Untuk interval menit, rentang maksimum {max_days} hari. "
+                             f"Gunakan /api/tide/prediction/minute untuk 1 hari penuh."
+                }), 400
+        else:
+            # Per-jam: rentang hingga 5 tahun
+            if interval_hours not in (1, 3, 6):
+                return jsonify({"error": "interval_hours harus 1, 3, atau 6"}), 400
+            max_days = 1826  # ~5 tahun (365.25 × 5)
+            if (end_dt - start_dt).days > max_days:
+                return jsonify({"error": f"Rentang maksimum {max_days} hari (~5 tahun) per request"}), 400
+
+        if end_dt <= start_dt:
+            return jsonify({"error": "end_date harus setelah start_date"}), 400
+
+        # Batas historis yang wajar (10 tahun ke belakang)
+        min_allowed = now_utc.replace(year=now_utc.year - 10, hour=0, minute=0, second=0, microsecond=0)
+        max_allowed = now_utc.replace(year=now_utc.year + 6, hour=23, minute=59, second=59, microsecond=0)
         if start_dt < min_allowed:
             return jsonify({"error": f"start_date terlalu jauh ke belakang (min: {min_allowed.date()})"}), 400
         if end_dt > max_allowed:
             return jsonify({"error": f"end_date terlalu jauh ke depan (maks: {max_allowed.date()})"}), 400
-        if end_dt <= start_dt:
-            return jsonify({"error": "end_date harus setelah start_date"}), 400
-        if (end_dt - start_dt).days > 366:
-            return jsonify({"error": "Rentang maksimum 366 hari per request"}), 400
-
-        interval_hours = request.args.get("interval_hours", default=1, type=int)
-        if interval_hours not in (1, 3, 6):
-            return jsonify({"error": "interval_hours harus 1, 3, atau 6"}), 400
 
         result = predictor.predict(
             lon=lon, lat=lat,
             start_dt=start_dt, end_dt=end_dt,
             interval_hours=interval_hours,
+            interval_minutes=interval_minutes,
         )
         return jsonify(result)
 
@@ -308,15 +360,57 @@ def get_tide_prediction():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Helper
+# ROUTE: Tide Prediction — Per Menit (1 hari penuh, dioptimalkan untuk chart)
 # ─────────────────────────────────────────────────────────────────────────────
-def _parse_date(s: str):
-    for fmt in ["%Y-%m-%d", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S"]:
-        try:
-            return datetime.strptime(s, fmt).replace(tzinfo=timezone.utc)
-        except ValueError:
-            continue
-    return None
+@app.route("/api/tide/prediction/minute")
+def get_tide_prediction_minute():
+    """
+    Prediksi pasut per menit untuk 1 hari penuh (1440 titik).
+    Dioptimalkan untuk rendering grafik interaktif di frontend.
+
+    Parameter:
+      lon  : longitude (float, wajib)
+      lat  : latitude  (float, wajib)
+      date : YYYY-MM-DD (default hari ini UTC)
+
+    Response:
+      Sama dengan /api/tide/prediction namun interval_minutes=1,
+      dengan 1440 titik dari 00:00 sampai 23:59 UTC.
+    """
+    if predictor is None:
+        return jsonify({"error": "Database TPXO tidak tersedia."}), 503
+
+    try:
+        lon = request.args.get("lon", type=float)
+        lat = request.args.get("lat", type=float)
+        lon, lat, err = _validate_lonlat(lon, lat)
+        if err:
+            return jsonify(err[0]), err[1]
+
+        date_str = request.args.get("date")
+        if date_str:
+            start_dt = _parse_date(date_str)
+            if start_dt is None:
+                return jsonify({"error": "Format date tidak valid (gunakan YYYY-MM-DD)"}), 400
+        else:
+            now_utc  = datetime.now(timezone.utc)
+            start_dt = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        # 1 hari penuh: 00:00 → 23:59 (1440 menit = 1439 interval)
+        end_dt = start_dt + timedelta(hours=23, minutes=59)
+
+        result = predictor.predict(
+            lon=lon, lat=lat,
+            start_dt=start_dt, end_dt=end_dt,
+            interval_minutes=1,
+        )
+        return jsonify(result)
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.error(f"Tide minute prediction error: {e}", exc_info=True)
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 
 # ─────────────────────────────────────────────────────────────────────────────

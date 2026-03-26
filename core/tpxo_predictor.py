@@ -3,6 +3,11 @@ TPXO Tide Predictor — Harmonic Analysis (15 Constituents)
 
 Formula: h(t) = Σ  f_k · A_k · cos( ω_k·t  +  V₀_k  +  u_k  -  κ_k )
 
+Perubahan:
+  - Mendukung interval_minutes (per menit) di samping interval_hours
+  - Mendukung rentang prediksi hingga 5 tahun
+  - predict() tetap kompatibel mundur: parameter interval_hours masih bekerja
+
 Referensi:
   Schureman (1958) Manual of Harmonic Analysis and Prediction of Tides
   Foreman (1977)   Manual for Tidal Heights Analysis and Prediction
@@ -186,6 +191,10 @@ def predict_harmonic(
 # KELAS PREDICTOR UTAMA
 # ══════════════════════════════════════════════════════════════
 
+# Batas maksimum titik prediksi (per-menit 5 tahun ≈ 2.6 juta titik)
+# Kita batasi per-request agar tidak OOM
+MAX_POINTS_PER_REQUEST = 527_040   # 366 hari × 1440 menit = 527_040
+
 class TPXOPredictor:
     """Prediksi pasang surut dari SQLite database TPXO9 (15 konstituen)."""
 
@@ -248,15 +257,21 @@ class TPXOPredictor:
         start_dt: datetime,
         end_dt: datetime,
         interval_hours: int = 1,
+        interval_minutes: Optional[int] = None,
     ) -> Dict:
         """
         Prediksi pasut dari start_dt sampai end_dt.
 
+        Prioritas interval:
+          1. Jika interval_minutes diset → gunakan interval_minutes (misalnya 1 untuk per menit)
+          2. Jika tidak, gunakan interval_hours (default 1 jam)
+
         Args:
-            lon, lat       : koordinat target
-            start_dt       : awal prediksi (UTC)
-            end_dt         : akhir prediksi (UTC)
-            interval_hours : resolusi output dalam jam (default 1)
+            lon, lat           : koordinat target
+            start_dt           : awal prediksi (UTC)
+            end_dt             : akhir prediksi (UTC)
+            interval_hours     : interval dalam jam (digunakan jika interval_minutes None)
+            interval_minutes   : interval dalam menit (prioritas lebih tinggi dari interval_hours)
 
         Returns:
             dict dengan predictions, statistics, grid, metadata
@@ -270,6 +285,28 @@ class TPXOPredictor:
         if end_dt <= start_dt:
             raise ValueError("end_dt harus setelah start_dt")
 
+        # Hitung interval aktual dalam jam (float)
+        if interval_minutes is not None:
+            if interval_minutes < 1:
+                raise ValueError("interval_minutes minimal 1")
+            interval_hours_float = interval_minutes / 60.0
+            interval_label_hours = interval_minutes / 60.0
+        else:
+            if interval_hours not in (1, 3, 6):
+                raise ValueError("interval_hours harus 1, 3, atau 6")
+            interval_hours_float  = float(interval_hours)
+            interval_label_hours  = float(interval_hours)
+
+        # Cek jumlah titik tidak meledak
+        total_hours = (end_dt - start_dt).total_seconds() / 3600.0
+        n_steps = int(round(total_hours / interval_hours_float)) + 1
+        if n_steps > MAX_POINTS_PER_REQUEST:
+            raise ValueError(
+                f"Terlalu banyak titik prediksi ({n_steps:,}). "
+                f"Maksimum {MAX_POINTS_PER_REQUEST:,} per request. "
+                f"Kurangi rentang tanggal atau perbesar interval."
+            )
+
         # Grid terdekat & harmonik
         grid = self.find_nearest_grid(lon, lat)
         harmonics = self.get_harmonics(grid['id'])
@@ -280,11 +317,8 @@ class TPXOPredictor:
         amp   = {n: harmonics.get(n, {}).get('amplitude', 0.0) for n in CONS_LIST}
         kappa = {n: harmonics.get(n, {}).get('phase', 0.0)     for n in CONS_LIST}
 
-        # Array waktu
-        total_hours = (end_dt - start_dt).total_seconds() / 3600.0
-        n_steps = int(total_hours / interval_hours) + 1
-        times = [start_dt + timedelta(hours=i * interval_hours) for i in range(n_steps)]
-        t_jam = np.arange(n_steps, dtype=float) * interval_hours
+        # Array waktu dalam jam (float) dari epoch start_dt
+        t_jam = np.arange(n_steps, dtype=float) * interval_hours_float
 
         # Argumen astronomis di epoch t₀ (awal prediksi)
         t0_naive = start_dt.replace(tzinfo=None)
@@ -299,13 +333,14 @@ class TPXOPredictor:
         # Hitung prediksi
         h_pred = predict_harmonic(t_jam, amp, kappa, V0_dict, f_dict, u_dict)
 
-        predictions = [
-            {
+        # Format output timestamps
+        predictions = []
+        for i in range(n_steps):
+            t = start_dt + timedelta(hours=float(t_jam[i]))
+            predictions.append({
                 'time': t.strftime('%Y-%m-%dT%H:%M:%SZ'),
-                'height': round(float(h), 4),
-            }
-            for t, h in zip(times, h_pred)
-        ]
+                'height': round(float(h_pred[i]), 4),
+            })
 
         heights = [p['height'] for p in predictions]
         stats = {
@@ -321,7 +356,9 @@ class TPXOPredictor:
                 'lat': lat,
                 'start_time': start_dt.strftime('%Y-%m-%dT%H:%M:%SZ'),
                 'end_time':   end_dt.strftime('%Y-%m-%dT%H:%M:%SZ'),
-                'interval_hours': interval_hours,
+                'interval_hours': interval_label_hours,
+                'interval_minutes': interval_minutes,
+                'n_points': n_steps,
             },
             'grid': {
                 'id': grid['id'],

@@ -22,9 +22,6 @@ env/
 data/luwes_raw.db
 data/auth.db
 
-# tpxo_seribu.db sengaja TIDAK di-ignore
-# File ini kecil (0.5MB), statis, dan wajib ada di repo agar Railway bisa deploy
-
 # Data besar
 data/*.nc
 data/*.mat
