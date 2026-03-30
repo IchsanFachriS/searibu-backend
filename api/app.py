@@ -1,29 +1,49 @@
 """
-TPXO Tide Prediction API — Flask
+TPXO Tide Prediction API — Flask  v2.4.0
 Backend utama sistem Searibu
 
-Endpoints:
-  GET  /                          → API index
-  GET  /api/health                → Health check
-  GET  /api/tide/prediction       → Prediksi pasut TPXO9 (jam atau menit)
-  GET  /api/tide/prediction/minute → Prediksi per menit (1 hari saja)
-  GET  /api/luwes/level           → Data terbaru stasiun Luwes
-  GET  /api/luwes/history         → History water level
-  GET  /api/luwes/status          → Status scheduler
-  POST /api/luwes/fetch           → Manual trigger fetch
-  GET  /api/luwes/overlay         → Luwes RAW + TPXO overlay
-  POST /api/auth/register         → Registrasi user
-  POST /api/auth/login            → Login user
-  GET  /api/s104/export           → S-104 HDF5 download (TPXO)
-  GET  /api/s104/export/luwes     → S-104 HDF5 download (Luwes)
-  GET  /api/s104/json             → S-104 JSON preview
-  GET  /api/s104/metadata         → S-100/S-104 compliance info
-  GET  /api/s104/validate         → Validasi file HDF5 S-104
+Perubahan v2.4.0 (satu-satunya perubahan dari v2.3.0):
+  Endpoint /api/tide/prediction/minute sekarang mengembalikan prediksi
+  yang selaras dengan hari WIB (UTC+7).
 
-Perubahan:
-  - /api/tide/prediction menerima parameter interval_minutes (1–60)
-  - /api/tide/prediction/minute endpoint khusus per-menit (1 hari, dioptimalkan)
-  - Rentang maksimum diperluas: 5 tahun untuk interval jam, 1 hari untuk per menit
+  SEBELUMNYA (v2.3.0):
+    date_str → start_dt = date 00:00:00 UTC  → WIB 07:00 hari itu
+               end_dt   = start_dt + 23h59m  → WIB 06:59 hari berikutnya
+    Masalah: WIB 00:00-06:59 hari ini = UTC 17:00-23:59 hari sebelumnya
+             TIDAK ada dalam satu request. Frontend harus fetch 2 request
+             dari hari berbeda → dua epoch harmonik berbeda → DISKONTINUITAS
+             fisik di titik junction ~07:00 WIB → grafik patah/kink.
+
+  SEKARANG (v2.4.0):
+    date_str → start_dt = (date-1) 17:00:00 UTC  = date 00:00:00 WIB
+               end_dt   = date     16:59:00 UTC  = date 23:59:00 WIB
+    Satu request tunggal → satu epoch harmonik → 1440 titik
+    fisik kontinu sempurna dari WIB 00:00 sampai 23:59.
+
+  Frontend hanya perlu satu fetch, tidak perlu merge, tidak ada junction.
+
+Kenapa 26 Maret sebelumnya mulus?
+  Cache v2.7.0 (single-fetch, 1 epoch) masih tersimpan untuk tanggal itu.
+  Semua tanggal lain cache-nya ditulis oleh v2.8.0/v2.9.0 (2-epoch merge)
+  sehingga ada kink. Fix ini menghilangkan masalah di semua tanggal.
+
+Endpoints (tidak berubah dari v2.3.0):
+  GET  /
+  GET  /api/health
+  GET  /api/tide/prediction
+  GET  /api/tide/prediction/minute  ← HANYA endpoint ini yang berubah
+  GET  /api/luwes/level
+  GET  /api/luwes/history
+  GET  /api/luwes/status
+  POST /api/luwes/fetch
+  GET  /api/luwes/overlay
+  POST /api/auth/register
+  POST /api/auth/login
+  GET  /api/s104/export
+  GET  /api/s104/export/luwes
+  GET  /api/s104/json
+  GET  /api/s104/metadata
+  GET  /api/s104/validate
 
 Standar:
   IHO S-100 Universal Hydrographic Data Model Ed.5.2.0 (2024)
@@ -58,6 +78,9 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+# ── Timezone WIB ──────────────────────────────────────────────────────────────
+WIB = timezone(timedelta(hours=7))
 
 # ── Flask App ─────────────────────────────────────────────────────────────────
 app = Flask(__name__)
@@ -101,7 +124,7 @@ init_auth_db(AUTH_DB_PATH)
 setup_auth(AUTH_DB_PATH)
 
 print("=" * 65)
-print("  Searibu — TPXO Tide Prediction API  v2.3.0")
+print("  Searibu — TPXO Tide Prediction API  v2.4.0")
 print(f"  TPXO Database  : {DB_PATH}")
 print(f"  Luwes DB       : {LUWES_DB_PATH}")
 print(f"  Auth DB        : {AUTH_DB_PATH}")
@@ -146,7 +169,7 @@ print("=" * 65)
 def index():
     return jsonify({
         "name":    "Searibu Marine Information API",
-        "version": "2.3.0",
+        "version": "2.4.0",
         "model":   "TPXO9-atlas-v5",
         "tpxo_ready": predictor is not None,
         "standards": {
@@ -156,7 +179,7 @@ def index():
         "endpoints": {
             "GET  /api/health":                   "Health check",
             "GET  /api/tide/prediction":           "?lon=&lat=&start_date=&end_date=&interval_hours= | &interval_minutes=",
-            "GET  /api/tide/prediction/minute":    "?lon=&lat=&date= → per-menit 1 hari (1440 titik)",
+            "GET  /api/tide/prediction/minute":    "?lon=&lat=&date=YYYY-MM-DD → per-menit WIB-aligned (1440 titik, 00:00–23:59 WIB)",
             "GET  /api/luwes/level":               "Data water level terbaru",
             "GET  /api/luwes/history":             "?start=YYYY-MM-DD&end=YYYY-MM-DD",
             "GET  /api/luwes/status":              "Status scheduler + statistik DB",
@@ -182,7 +205,7 @@ def health():
     if predictor is None:
         return jsonify({
             "status":  "degraded",
-            "version": "2.3.0",
+            "version": "2.4.0",
             "message": "Database TPXO tidak tersedia. Commit data/tpxo_seribu.db ke repo.",
             "luwes_scheduler": "running",
             "auth_db": "ok",
@@ -196,13 +219,14 @@ def health():
         harm_count = cursor.fetchone()[0]
         return jsonify({
             "status":             "healthy",
-            "version":            "2.3.0",
+            "version":            "2.4.0",
             "grid_points":        grid_count,
             "harmonic_constants": harm_count,
             "s104_ready":         True,
             "features": {
-                "per_minute_prediction": True,
-                "max_range_years":       5,
+                "per_minute_prediction":       True,
+                "wib_aligned_minute_endpoint": True,
+                "max_range_years":             5,
             },
             "standards": {
                 "S-100": "Ed.5.2.0",
@@ -311,32 +335,28 @@ def get_tide_prediction():
         else:
             end_dt = start_dt + timedelta(days=7)
 
-        # Cek apakah per-menit diminta
         interval_minutes = request.args.get("interval_minutes", type=int)
         interval_hours   = request.args.get("interval_hours", default=1, type=int)
 
         if interval_minutes is not None:
-            # Per-menit: validasi ketat
             if interval_minutes < 1 or interval_minutes > 60:
                 return jsonify({"error": "interval_minutes harus antara 1 dan 60"}), 400
-            max_days = 31   # max 31 hari untuk per-menit via endpoint ini
+            max_days = 31
             if (end_dt - start_dt).days > max_days:
                 return jsonify({
                     "error": f"Untuk interval menit, rentang maksimum {max_days} hari. "
                              f"Gunakan /api/tide/prediction/minute untuk 1 hari penuh."
                 }), 400
         else:
-            # Per-jam: rentang hingga 5 tahun
             if interval_hours not in (1, 3, 6):
                 return jsonify({"error": "interval_hours harus 1, 3, atau 6"}), 400
-            max_days = 1826  # ~5 tahun (365.25 × 5)
+            max_days = 1826
             if (end_dt - start_dt).days > max_days:
                 return jsonify({"error": f"Rentang maksimum {max_days} hari (~5 tahun) per request"}), 400
 
         if end_dt <= start_dt:
             return jsonify({"error": "end_date harus setelah start_date"}), 400
 
-        # Batas historis yang wajar (10 tahun ke belakang)
         min_allowed = now_utc.replace(year=now_utc.year - 10, hour=0, minute=0, second=0, microsecond=0)
         max_allowed = now_utc.replace(year=now_utc.year + 6, hour=23, minute=59, second=59, microsecond=0)
         if start_dt < min_allowed:
@@ -360,22 +380,46 @@ def get_tide_prediction():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ROUTE: Tide Prediction — Per Menit (1 hari penuh, dioptimalkan untuk chart)
+# ROUTE: Tide Prediction — Per Menit, WIB-Aligned (v2.4.0)
 # ─────────────────────────────────────────────────────────────────────────────
 @app.route("/api/tide/prediction/minute")
 def get_tide_prediction_minute():
     """
-    Prediksi pasut per menit untuk 1 hari penuh (1440 titik).
+    Prediksi pasut per menit untuk 1 hari WIB penuh (1440 titik).
     Dioptimalkan untuk rendering grafik interaktif di frontend.
 
     Parameter:
       lon  : longitude (float, wajib)
       lat  : latitude  (float, wajib)
-      date : YYYY-MM-DD (default hari ini UTC)
+      date : YYYY-MM-DD sebagai hari WIB (default hari ini WIB)
 
-    Response:
-      Sama dengan /api/tide/prediction namun interval_minutes=1,
-      dengan 1440 titik dari 00:00 sampai 23:59 UTC.
+    ════════════════════════════════════════════════════════════
+    FIX v2.4.0 — WIB-Aligned window
+    ════════════════════════════════════════════════════════════
+    Masalah v2.3.0:
+      start_dt = date 00:00:00 UTC  → WIB 07:00 hari itu
+      end_dt   = date 23:59:00 UTC  → WIB 06:59 hari berikutnya
+      
+      WIB 00:00–06:59 hari ini = UTC 17:00–23:59 hari sebelumnya
+      → tidak ada dalam satu request.
+      
+      Frontend harus merge dua request → dua epoch harmonik berbeda
+      → diskontinuitas fisik di titik junction → grafik patah/kink.
+
+    Solusi v2.4.0:
+      start_dt = (date-1) 17:00:00 UTC  = date 00:00:00 WIB
+      end_dt   = date     16:59:00 UTC  = date 23:59:00 WIB
+      
+      Satu request → satu epoch harmonik → 1440 titik kontinu.
+      Frontend cukup 1 fetch, tidak perlu merge.
+
+    Contoh date=2026-03-31:
+      start_dt = 2026-03-30T17:00:00Z  = 2026-03-31T00:00 WIB  ✓
+      end_dt   = 2026-03-31T16:59:00Z  = 2026-03-31T23:59 WIB  ✓
+
+    Response timestamps tetap UTC (suffix Z), seperti sebelumnya.
+    Frontend mengkonversi ke WIB (+7 jam) untuk display.
+    ════════════════════════════════════════════════════════════
     """
     if predictor is None:
         return jsonify({"error": "Database TPXO tidak tersedia."}), 503
@@ -387,23 +431,51 @@ def get_tide_prediction_minute():
         if err:
             return jsonify(err[0]), err[1]
 
+        # Parse ?date= sebagai hari WIB
         date_str = request.args.get("date")
         if date_str:
-            start_dt = _parse_date(date_str)
-            if start_dt is None:
+            try:
+                wib_date = datetime.strptime(date_str, "%Y-%m-%d")
+            except ValueError:
                 return jsonify({"error": "Format date tidak valid (gunakan YYYY-MM-DD)"}), 400
         else:
-            now_utc  = datetime.now(timezone.utc)
-            start_dt = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+            # Default: hari ini dalam WIB
+            wib_date = datetime.now(WIB).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            ).replace(tzinfo=None)
 
-        # 1 hari penuh: 00:00 → 23:59 (1440 menit = 1439 interval)
+        # ── KUNCI FIX: hitung UTC window yang setara dengan WIB 00:00–23:59 ──
+        #
+        # WIB 00:00 = UTC (date - 1 hari) 17:00:00
+        # WIB 23:59 = UTC date 16:59:00
+        #
+        # Implementasi: ambil midnight UTC dari wib_date, geser -7 jam
+        # sehingga menghasilkan (wib_date - 1 hari) 17:00 UTC
+        start_dt = datetime(
+            wib_date.year, wib_date.month, wib_date.day,
+            0, 0, 0,
+            tzinfo=timezone.utc
+        ) - timedelta(hours=7)
+        # start_dt = (wib_date - 1 hari) T17:00:00Z = wib_date T00:00:00 WIB
+
         end_dt = start_dt + timedelta(hours=23, minutes=59)
+        # end_dt = wib_date T16:59:00Z = wib_date T23:59:00 WIB
 
         result = predictor.predict(
             lon=lon, lat=lat,
-            start_dt=start_dt, end_dt=end_dt,
+            start_dt=start_dt,
+            end_dt=end_dt,
             interval_minutes=1,
         )
+
+        # Tambah info timezone ke response agar frontend bisa verifikasi
+        result["wib_info"] = {
+            "wib_date":  wib_date.strftime("%Y-%m-%d"),
+            "utc_start": start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "utc_end":   end_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "note":      "UTC start = WIB 00:00, UTC end = WIB 23:59. +7 untuk konversi ke WIB.",
+        }
+
         return jsonify(result)
 
     except ValueError as e:
