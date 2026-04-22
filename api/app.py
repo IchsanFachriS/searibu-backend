@@ -73,6 +73,9 @@ from api.auth_db         import init_auth_db
 from api.s104_routes     import s104_bp, setup_s104
 from api.billing_routes import billing_bp, setup_billing
 
+from dotenv import load_dotenv
+load_dotenv() 
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
