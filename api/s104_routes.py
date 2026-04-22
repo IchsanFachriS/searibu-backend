@@ -65,17 +65,6 @@ def _parse_params():
 # ─────────────────────────────────────────────────────────────────────────────
 @s104_bp.route("/export")
 def export_s104():
-    """
-    Unduh file HDF5 IHO S-104 Ed.2.0.0 untuk prediksi pasut TPXO.
-
-    Query params:
-      lon   : longitude (float, wajib)
-      lat   : latitude  (float, wajib)
-      date  : YYYY-MM-DD (default: hari ini WIB)
-
-    Response:
-      application/x-hdf  →  file .h5 untuk diunduh
-    """
     lon, lat, date_str, err = _parse_params()
     if err:
         return jsonify({"error": err}), 400
@@ -85,8 +74,16 @@ def export_s104():
 
     try:
         from .s104_exporter import export_s104_tpxo
-        start_dt = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        end_dt   = start_dt + timedelta(days=1)
+
+        # Sama persis dengan InfoPanel: fetch prevDay–nextDay UTC,
+        # lalu filter yang wibDate == date_str
+        WIB = timezone(timedelta(hours=7))
+
+        prev_day = (datetime.strptime(date_str, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+        next_day = (datetime.strptime(date_str, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+
+        start_dt = datetime.strptime(prev_day, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        end_dt   = datetime.strptime(next_day, "%Y-%m-%d").replace(tzinfo=timezone.utc)
 
         result = _predictor.predict(
             lon=lon, lat=lat,
@@ -94,22 +91,24 @@ def export_s104():
             interval_hours=1,
         )
 
+        # Filter: hanya prediksi yang wibDate == date_str (sama seperti infopanel)
+        def to_wib_date(iso_utc: str) -> str:
+            dt = datetime.strptime(iso_utc, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            return (dt + timedelta(hours=7)).strftime("%Y-%m-%d")
+
+        filtered = [p for p in result["predictions"] if to_wib_date(p["time"]) == date_str]
+
         grid = result.get("grid", {})
         path = export_s104_tpxo(
-            predictions     = result["predictions"],
-            grid_lat        = grid.get("lat", lat),
-            grid_lon        = grid.get("lon", lon),
-            grid_distance_km= grid.get("distance_km", 0.0),
-            date_str        = date_str,
+            predictions      = filtered,
+            grid_lat         = grid.get("lat", lat),
+            grid_lon         = grid.get("lon", lon),
+            grid_distance_km = grid.get("distance_km", 0.0),
+            date_str         = date_str,
         )
 
         filename = f"searibu_s104_tpxo_{date_str}_{abs(lat):.3f}_{lon:.3f}.h5"
-        return send_file(
-            path,
-            as_attachment   = True,
-            download_name   = filename,
-            mimetype        = "application/x-hdf",
-        )
+        return send_file(path, as_attachment=True, download_name=filename, mimetype="application/x-hdf")
 
     except Exception as e:
         logger.error(f"S-104 TPXO export error: {e}", exc_info=True)

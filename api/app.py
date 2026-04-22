@@ -71,6 +71,7 @@ from api.luwes_scheduler import start_scheduler
 from api.auth_routes     import auth_bp, setup_auth
 from api.auth_db         import init_auth_db
 from api.s104_routes     import s104_bp, setup_s104
+from api.billing_routes import billing_bp, setup_billing
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -115,6 +116,11 @@ os.makedirs(_volume_data, exist_ok=True)
 LUWES_DB_PATH = os.getenv("LUWES_DB_PATH", f"{_volume_data}/luwes_raw.db")
 AUTH_DB_PATH  = os.getenv("AUTH_DB_PATH",  f"{_volume_data}/auth.db")
 LUWES_IMEI    = os.getenv("LUWES_IMEI",    "869556066101370")
+
+BILLING_DB_PATH = os.getenv("BILLING_DB_PATH", f"{_volume_data}/billing.db")
+app.register_blueprint(billing_bp)
+setup_billing(BILLING_DB_PATH)
+print(f"  Billing DB     : {BILLING_DB_PATH}")
 
 # ── Init Databases ────────────────────────────────────────────────────────────
 init_db(LUWES_DB_PATH)

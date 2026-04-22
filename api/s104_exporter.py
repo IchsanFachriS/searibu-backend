@@ -62,14 +62,8 @@ TREND_THRESHOLD    = 0.1
 
 
 def _iso_to_hdf_dt(iso_str: str) -> str:
-    """Convert ISO 8601 UTC string → S-104 format yyyymmddTHHMMSSZ."""
-    for fmt in ["%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S"]:
-        try:
-            dt = datetime.strptime(iso_str, fmt).replace(tzinfo=timezone.utc)
-            return dt.strftime("%Y%m%dT%H%M%SZ")
-        except ValueError:
-            continue
-    return iso_str.replace("-", "").replace(":", "").replace(" ", "T")
+    """Tulis waktu apa adanya ke format S-104 yyyymmddTHHMMSSZ, tanpa konversi."""
+    return iso_str.replace("-", "").replace(":", "").replace(" ", "T").rstrip("Z") + "Z"
 
 
 def _compute_trend(heights: np.ndarray, threshold: float = TREND_THRESHOLD) -> np.ndarray:
