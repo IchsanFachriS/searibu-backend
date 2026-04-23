@@ -1,114 +1,25 @@
 """
-Luwes DB — SQLite persistence untuk observasi water level.
+luwes_db.py — PostgreSQL version
+Menggantikan implementasi SQLite sebelumnya.
 
-Satu database utama:
-  luwes_raw.db → semua data historis sejak stasiun aktif (tidak pernah dihapus)
-
-Skema tabel water_level_observations:
-  id           INTEGER PK AUTOINCREMENT
-  rec          INTEGER UNIQUE   ← ID unik dari Luwes API, cegah duplikat
-  station_id   INTEGER
-  station_name TEXT
-  imei         TEXT
-  level_m      REAL
-  recorded_at  TEXT             ← ISO8601 UTC (dari API) → dikonversi WIB +07:00
-  fetched_at   TEXT             ← ISO8601 WIB +07:00
-
-Index:
-  idx_obs_recorded_at  → query range waktu cepat
-  idx_obs_imei         → filter per stasiun
-  idx_obs_rec          → lookup duplikat cepat
+API publik identik dengan versi SQLite sehingga luwes_service.py,
+luwes_scheduler.py, dan luwes_routes.py tidak perlu diubah banyak.
 """
 
-import sqlite3
-import threading
-from pathlib import Path
+import logging
 from datetime import datetime, timezone, timedelta
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional
 
+from .pg_db import get_cursor, execute_one, execute_all, execute_returning
+
+logger = logging.getLogger(__name__)
 WIB = timezone(timedelta(hours=7))
 
-_lock = threading.Lock()
 
-_DDL_OBSERVATIONS = """
-    CREATE TABLE IF NOT EXISTS water_level_observations (
-        id           INTEGER PRIMARY KEY AUTOINCREMENT,
-        rec          INTEGER UNIQUE,
-        station_id   INTEGER,
-        station_name TEXT,
-        imei         TEXT,
-        level_m      REAL,
-        recorded_at  TEXT,
-        fetched_at   TEXT
-    )
-"""
-
-_DDL_IDX_RECORDED = """
-    CREATE INDEX IF NOT EXISTS idx_obs_recorded_at
-    ON water_level_observations(recorded_at)
-"""
-
-_DDL_IDX_IMEI = """
-    CREATE INDEX IF NOT EXISTS idx_obs_imei
-    ON water_level_observations(imei)
-"""
-
-_DDL_IDX_REC = """
-    CREATE INDEX IF NOT EXISTS idx_obs_rec
-    ON water_level_observations(rec)
-"""
-
-_DDL_FETCH_LOG = """
-    CREATE TABLE IF NOT EXISTS fetch_log (
-        id           INTEGER PRIMARY KEY AUTOINCREMENT,
-        fetched_at   TEXT,
-        imei         TEXT,
-        status       TEXT,   -- 'ok' | 'duplicate' | 'error'
-        rec          INTEGER,
-        level_m      REAL,
-        recorded_at  TEXT,
-        message      TEXT
-    )
-"""
-
-_DDL_IDX_FETCH_LOG = """
-    CREATE INDEX IF NOT EXISTS idx_fetch_log_imei_time
-    ON fetch_log(imei, fetched_at)
-"""
-
-
-# ══════════════════════════════════════════════════════════════
-# KONEKSI
-# ══════════════════════════════════════════════════════════════
-
-def _connect(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA cache_size=-4096")  # 4MB cache
-    return conn
-
-
-# ══════════════════════════════════════════════════════════════
-# INISIALISASI
-# ══════════════════════════════════════════════════════════════
-
-def init_db(db_path: str):
-    """Buat semua tabel dan index jika belum ada."""
-    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-    with _lock:
-        conn = _connect(db_path)
-        try:
-            conn.execute(_DDL_OBSERVATIONS)
-            conn.execute(_DDL_IDX_RECORDED)
-            conn.execute(_DDL_IDX_IMEI)
-            conn.execute(_DDL_IDX_REC)
-            conn.execute(_DDL_FETCH_LOG)
-            conn.execute(_DDL_IDX_FETCH_LOG)
-            conn.commit()
-        finally:
-            conn.close()
+# ── No-op: tabel dibuat via SQL migration ────────────────────
+def init_db(db_path: str = None):
+    """No-op di PostgreSQL mode. Tabel sudah dibuat via migration SQL."""
+    logger.info("[luwes_db] PostgreSQL mode — tabel sudah ada via migration SQL")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -119,38 +30,61 @@ def insert_observation(db_path: str, obs: Dict) -> bool:
     """
     Simpan satu observasi.
     Return True jika inserted baru, False jika duplikat (rec sudah ada).
+
+    obs keys: rec, station_id, station_name, imei, level_m, recorded_at, fetched_at
     """
-    with _lock:
-        conn = _connect(db_path)
-        try:
-            conn.execute("""
-                INSERT INTO water_level_observations
-                    (rec, station_id, station_name, imei, level_m, recorded_at, fetched_at)
-                VALUES
-                    (:rec, :station_id, :station_name, :imei, :level_m, :recorded_at, :fetched_at)
-            """, obs)
-            conn.commit()
-            return True
-        except sqlite3.IntegrityError:
-            return False
-        finally:
-            conn.close()
+    try:
+        # Parse recorded_at — bisa string ISO8601 atau sudah TIMESTAMPTZ
+        recorded_at = obs.get("recorded_at")
+        fetched_at  = obs.get("fetched_at")
+
+        execute_returning(
+            """
+            INSERT INTO water_level_observations
+                (rec, station_id, station_name, imei, level_m, recorded_at, fetched_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+            """,
+            (
+                obs.get("rec"),
+                obs.get("station_id"),
+                obs.get("station_name"),
+                obs.get("imei"),
+                obs.get("level_m"),
+                recorded_at,
+                fetched_at,
+            )
+        )
+        return True
+    except Exception as e:
+        if "unique" in str(e).lower() or "duplicate" in str(e).lower():
+            return False   # duplikat rec
+        logger.error(f"[luwes_db] insert_observation error: {e}")
+        raise
 
 
 def insert_fetch_log(db_path: str, log: Dict):
     """Simpan log satu fetch operation."""
-    with _lock:
-        conn = _connect(db_path)
-        try:
-            conn.execute("""
-                INSERT INTO fetch_log
-                    (fetched_at, imei, status, rec, level_m, recorded_at, message)
-                VALUES
-                    (:fetched_at, :imei, :status, :rec, :level_m, :recorded_at, :message)
-            """, log)
-            conn.commit()
-        finally:
-            conn.close()
+    try:
+        execute_returning(
+            """
+            INSERT INTO fetch_log
+                (fetched_at, imei, status, rec, level_m, recorded_at, message)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+            """,
+            (
+                log.get("fetched_at"),
+                log.get("imei"),
+                log.get("status"),
+                log.get("rec"),
+                log.get("level_m"),
+                log.get("recorded_at"),
+                log.get("message"),
+            )
+        )
+    except Exception as e:
+        logger.warning(f"[luwes_db] insert_fetch_log failed (non-critical): {e}")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -159,21 +93,22 @@ def insert_fetch_log(db_path: str, log: Dict):
 
 def get_latest(db_path: str, imei: str) -> Optional[Dict]:
     """Ambil observasi terbaru untuk imei ini."""
-    with _lock:
-        conn = _connect(db_path)
-        try:
-            cursor = conn.execute("""
-                SELECT rec, station_id, station_name, imei,
-                       level_m, recorded_at, fetched_at
-                FROM water_level_observations
-                WHERE imei = ?
-                ORDER BY recorded_at DESC
-                LIMIT 1
-            """, (imei,))
-            row = cursor.fetchone()
-            return dict(row) if row else None
-        finally:
-            conn.close()
+    row = execute_one(
+        """
+        SELECT rec, station_id, station_name, imei,
+               level_m,
+               recorded_at AT TIME ZONE 'UTC' AS recorded_at,
+               fetched_at  AT TIME ZONE 'UTC' AS fetched_at
+        FROM water_level_observations
+        WHERE imei = %s
+        ORDER BY recorded_at DESC
+        LIMIT 1
+        """,
+        (imei,)
+    )
+    if not row:
+        return None
+    return _format_obs_row(dict(row))
 
 
 def get_by_date_range(
@@ -184,25 +119,25 @@ def get_by_date_range(
     limit: int = 10000
 ) -> List[Dict]:
     """
-    Ambil observasi dalam rentang tanggal.
+    Ambil observasi dalam rentang waktu.
     start, end: ISO8601 string, e.g. '2024-01-01T00:00:00+07:00'
     """
-    with _lock:
-        conn = _connect(db_path)
-        try:
-            cursor = conn.execute("""
-                SELECT rec, station_id, station_name, imei,
-                       level_m, recorded_at, fetched_at
-                FROM water_level_observations
-                WHERE imei = ?
-                  AND recorded_at >= ?
-                  AND recorded_at <= ?
-                ORDER BY recorded_at ASC
-                LIMIT ?
-            """, (imei, start, end, limit))
-            return [dict(r) for r in cursor.fetchall()]
-        finally:
-            conn.close()
+    rows = execute_all(
+        """
+        SELECT rec, station_id, station_name, imei,
+               level_m,
+               recorded_at,
+               fetched_at
+        FROM water_level_observations
+        WHERE imei = %s
+          AND recorded_at >= %s::TIMESTAMPTZ
+          AND recorded_at <= %s::TIMESTAMPTZ
+        ORDER BY recorded_at ASC
+        LIMIT %s
+        """,
+        (imei, start, end, limit)
+    )
+    return [_format_obs_row(dict(r)) for r in rows]
 
 
 def get_today(db_path: str, imei: str) -> List[Dict]:
@@ -214,98 +149,92 @@ def get_today(db_path: str, imei: str) -> List[Dict]:
 
 
 def get_stats(db_path: str, imei: str) -> Dict:
-    """
-    Ambil statistik keseluruhan data untuk imei ini.
-    Return: total_records, oldest_record, newest_record, date_range_days
-    """
-    with _lock:
-        conn = _connect(db_path)
-        try:
-            cursor = conn.execute("""
-                SELECT
-                    COUNT(*)           AS total_records,
-                    MIN(recorded_at)   AS oldest_record,
-                    MAX(recorded_at)   AS newest_record
-                FROM water_level_observations
-                WHERE imei = ?
-            """, (imei,))
-            row = cursor.fetchone()
-            if not row or row["total_records"] == 0:
-                return {
-                    "total_records": 0,
-                    "oldest_record": None,
-                    "newest_record": None,
-                    "date_range_days": 0,
-                }
+    """Statistik keseluruhan data untuk imei ini."""
+    row = execute_one(
+        """
+        SELECT
+            COUNT(*)                                         AS total_records,
+            MIN(recorded_at AT TIME ZONE 'Asia/Jakarta')     AS oldest_record,
+            MAX(recorded_at AT TIME ZONE 'Asia/Jakarta')     AS newest_record
+        FROM water_level_observations
+        WHERE imei = %s
+        """,
+        (imei,)
+    )
+    if not row or not row["total_records"]:
+        return {"total_records": 0, "oldest_record": None, "newest_record": None, "date_range_days": 0}
 
-            oldest = row["oldest_record"]
-            newest = row["newest_record"]
+    oldest = row["oldest_record"]
+    newest = row["newest_record"]
+    days = 0
+    if oldest and newest:
+        if hasattr(oldest, 'days'):
             days = 0
-            if oldest and newest:
-                try:
-                    # Parse untuk hitung selisih hari
-                    fmt = "%Y-%m-%dT%H:%M:%S%z"
-                    t1 = datetime.strptime(oldest, fmt)
-                    t2 = datetime.strptime(newest, fmt)
-                    days = (t2 - t1).days
-                except Exception:
-                    pass
+        else:
+            try:
+                days = (newest - oldest).days
+            except Exception:
+                pass
 
-            return {
-                "total_records": row["total_records"],
-                "oldest_record": oldest,
-                "newest_record": newest,
-                "date_range_days": days,
-            }
-        finally:
-            conn.close()
+    return {
+        "total_records": row["total_records"],
+        "oldest_record": oldest.isoformat() if hasattr(oldest, 'isoformat') else str(oldest),
+        "newest_record": newest.isoformat() if hasattr(newest, 'isoformat') else str(newest),
+        "date_range_days": days,
+    }
 
 
 def get_recent_fetch_logs(db_path: str, imei: str, limit: int = 20) -> List[Dict]:
     """Ambil log fetch terbaru untuk monitoring."""
-    with _lock:
-        conn = _connect(db_path)
-        try:
-            cursor = conn.execute("""
-                SELECT fetched_at, status, rec, level_m, recorded_at, message
-                FROM fetch_log
-                WHERE imei = ?
-                ORDER BY id DESC
-                LIMIT ?
-            """, (imei, limit))
-            return [dict(r) for r in cursor.fetchall()]
-        finally:
-            conn.close()
+    rows = execute_all(
+        """
+        SELECT fetched_at, status, rec, level_m, recorded_at, message
+        FROM fetch_log
+        WHERE imei = %s
+        ORDER BY id DESC
+        LIMIT %s
+        """,
+        (imei, limit)
+    )
+    result = []
+    for r in rows:
+        d = dict(r)
+        if d.get("fetched_at") and hasattr(d["fetched_at"], "isoformat"):
+            d["fetched_at"] = d["fetched_at"].isoformat()
+        if d.get("recorded_at") and hasattr(d["recorded_at"], "isoformat"):
+            d["recorded_at"] = d["recorded_at"].isoformat()
+        result.append(d)
+    return result
 
 
 def rec_exists(db_path: str, rec: int) -> bool:
     """Cek apakah rec tertentu sudah ada di database."""
-    with _lock:
-        conn = _connect(db_path)
-        try:
-            cursor = conn.execute(
-                "SELECT 1 FROM water_level_observations WHERE rec = ? LIMIT 1",
-                (rec,)
-            )
-            return cursor.fetchone() is not None
-        finally:
-            conn.close()
+    row = execute_one(
+        "SELECT 1 FROM water_level_observations WHERE rec = %s LIMIT 1",
+        (rec,)
+    )
+    return row is not None
 
 
 def get_latest_rec(db_path: str, imei: str) -> Optional[int]:
-    """
-    Ambil nilai rec terbesar (terbaru) untuk imei ini.
-    Berguna untuk mendeteksi apakah ada data baru dari API.
-    """
-    with _lock:
-        conn = _connect(db_path)
-        try:
-            cursor = conn.execute("""
-                SELECT MAX(rec) as max_rec
-                FROM water_level_observations
-                WHERE imei = ?
-            """, (imei,))
-            row = cursor.fetchone()
-            return row["max_rec"] if row and row["max_rec"] is not None else None
-        finally:
-            conn.close()
+    """Ambil nilai rec terbesar untuk imei ini."""
+    row = execute_one(
+        "SELECT MAX(rec) AS max_rec FROM water_level_observations WHERE imei = %s",
+        (imei,)
+    )
+    return row["max_rec"] if row and row["max_rec"] is not None else None
+
+
+# ── Helper ────────────────────────────────────────────────────
+
+def _format_obs_row(row: Dict) -> Dict:
+    """Konversi datetime objects ke ISO8601 string untuk kompatibilitas."""
+    for key in ("recorded_at", "fetched_at"):
+        val = row.get(key)
+        if val is not None and hasattr(val, "isoformat"):
+            # Simpan dalam format +07:00 untuk kompatibilitas dengan luwes_service
+            if hasattr(val, "tzinfo") and val.tzinfo is not None:
+                row[key] = val.astimezone(WIB).strftime("%Y-%m-%dT%H:%M:%S+07:00")
+            else:
+                row[key] = val.isoformat()
+    return row

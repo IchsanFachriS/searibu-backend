@@ -1,71 +1,45 @@
 """
-Auth DB — SQLite persistence untuk user accounts.
+auth_db.py — PostgreSQL version
+Menggantikan implementasi SQLite sebelumnya.
 
-Tabel:
-  users → menyimpan data akun pengguna
-
-Fitur:
-  - Password di-hash pakai SHA-256 + salt
-  - Email unik (tidak boleh duplikat)
-  - Timestamps: created_at, last_login
+Semua operasi database menggunakan pg_db.py (psycopg2 + connection pool).
+API publik identik dengan versi SQLite sehingga auth_routes.py tidak perlu diubah.
 """
 
-import sqlite3
 import hashlib
 import os
-import threading
-from pathlib import Path
+import logging
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict
 
+from .pg_db import get_cursor, execute_one, execute_returning
+
+logger = logging.getLogger(__name__)
 WIB = timezone(timedelta(hours=7))
-_lock = threading.Lock()
 
-_DDL_USERS = """
-    CREATE TABLE IF NOT EXISTS users (
-        id           INTEGER PRIMARY KEY AUTOINCREMENT,
-        full_name    TEXT NOT NULL,
-        email        TEXT NOT NULL UNIQUE,
-        password_hash TEXT NOT NULL,
-        salt         TEXT NOT NULL,
-        created_at   TEXT NOT NULL,
-        last_login   TEXT
-    )
-"""
-
-_DDL_IDX_EMAIL = """
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email
-    ON users(email)
-"""
+# ── Fungsi ini sekarang no-op karena tabel dibuat via migration SQL ──────────
+def init_auth_db(db_path: str = None):
+    """
+    Tidak melakukan apa-apa di versi PostgreSQL.
+    Tabel sudah dibuat via migrations/001_initial_schema.sql di Supabase.
+    Parameter db_path dipertahankan agar pemanggil lama (app.py) tidak error.
+    """
+    logger.info("[auth_db] PostgreSQL mode — tabel sudah ada via migration SQL")
 
 
-def _connect(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    return conn
-
-
-def init_auth_db(db_path: str):
-    """Buat tabel users jika belum ada."""
-    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-    with _lock:
-        conn = _connect(db_path)
-        try:
-            conn.execute(_DDL_USERS)
-            conn.execute(_DDL_IDX_EMAIL)
-            conn.commit()
-        finally:
-            conn.close()
+# ── Fungsi ini juga no-op ─────────────────────────────────────────────────────
+def setup_auth(db_path: str = None):
+    """No-op di PostgreSQL mode. Dipanggil dari app.py, tidak melakukan apa-apa."""
+    pass
 
 
 def _hash_password(password: str, salt: str) -> str:
-    """Hash password dengan SHA-256 + salt."""
+    """Hash password dengan SHA-256 + salt (identik dengan versi SQLite)."""
     salted = f"{salt}{password}{salt}".encode("utf-8")
     return hashlib.sha256(salted).hexdigest()
 
 
-def create_user(db_path: str, full_name: str, email: str, password: str) -> Dict:
+def create_user(db_path: str = None, full_name: str = "", email: str = "", password: str = "") -> Dict:
     """
     Buat user baru.
     Return: dict user (tanpa password_hash & salt)
@@ -73,78 +47,82 @@ def create_user(db_path: str, full_name: str, email: str, password: str) -> Dict
     """
     salt = os.urandom(32).hex()
     password_hash = _hash_password(password, salt)
-    now = datetime.now(WIB).strftime("%Y-%m-%dT%H:%M:%S+07:00")
 
-    with _lock:
-        conn = _connect(db_path)
-        try:
-            cursor = conn.execute("""
-                INSERT INTO users (full_name, email, password_hash, salt, created_at)
-                VALUES (?, ?, ?, ?, ?)
-            """, (full_name.strip(), email.lower().strip(), password_hash, salt, now))
-            conn.commit()
-            user_id = cursor.lastrowid
-            return {
-                "id": user_id,
-                "full_name": full_name.strip(),
-                "email": email.lower().strip(),
-                "created_at": now,
-            }
-        except sqlite3.IntegrityError:
+    try:
+        row = execute_returning(
+            """
+            INSERT INTO users (full_name, email, password_hash, salt)
+            VALUES (%s, %s, %s, %s)
+            RETURNING id, full_name, email, created_at
+            """,
+            (full_name.strip(), email.lower().strip(), password_hash, salt)
+        )
+        return {
+            "id":         row["id"],
+            "full_name":  row["full_name"],
+            "email":      row["email"],
+            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+        }
+    except Exception as e:
+        # psycopg2 raise UniqueViolation (subclass IntegrityError) jika duplicate
+        if "unique" in str(e).lower() or "duplicate" in str(e).lower():
             raise ValueError(f"Email '{email}' sudah terdaftar")
-        finally:
-            conn.close()
+        raise
 
 
-def verify_user(db_path: str, email: str, password: str) -> Optional[Dict]:
+def verify_user(db_path: str = None, email: str = "", password: str = "") -> Optional[Dict]:
     """
     Verifikasi login.
     Return: dict user jika berhasil, None jika gagal.
     """
-    with _lock:
-        conn = _connect(db_path)
-        try:
-            cursor = conn.execute("""
-                SELECT id, full_name, email, password_hash, salt, created_at
-                FROM users WHERE email = ?
-            """, (email.lower().strip(),))
-            row = cursor.fetchone()
-            if not row:
-                return None
+    row = execute_one(
+        """
+        SELECT id, full_name, email, password_hash, salt, created_at, last_login
+        FROM users WHERE email = %s
+        """,
+        (email.lower().strip(),)
+    )
+    if not row:
+        return None
 
-            expected = _hash_password(password, row["salt"])
-            if expected != row["password_hash"]:
-                return None
+    expected = _hash_password(password, row["salt"])
+    if expected != row["password_hash"]:
+        return None
 
-            # Update last_login
-            now = datetime.now(WIB).strftime("%Y-%m-%dT%H:%M:%S+07:00")
-            conn.execute(
-                "UPDATE users SET last_login = ? WHERE id = ?",
-                (now, row["id"])
-            )
-            conn.commit()
+    # Update last_login
+    with get_cursor() as cur:
+        cur.execute(
+            "UPDATE users SET last_login = NOW() WHERE id = %s RETURNING last_login",
+            (row["id"],)
+        )
+        updated = cur.fetchone()
 
-            return {
-                "id": row["id"],
-                "full_name": row["full_name"],
-                "email": row["email"],
-                "created_at": row["created_at"],
-                "last_login": now,
-            }
-        finally:
-            conn.close()
+    last_login = updated["last_login"].isoformat() if updated and updated["last_login"] else None
+
+    return {
+        "id":         row["id"],
+        "full_name":  row["full_name"],
+        "email":      row["email"],
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+        "last_login": last_login,
+    }
 
 
-def get_user_by_email(db_path: str, email: str) -> Optional[Dict]:
+def get_user_by_email(db_path: str = None, email: str = "") -> Optional[Dict]:
     """Ambil user by email (tanpa password info)."""
-    with _lock:
-        conn = _connect(db_path)
-        try:
-            cursor = conn.execute("""
-                SELECT id, full_name, email, created_at, last_login
-                FROM users WHERE email = ?
-            """, (email.lower().strip(),))
-            row = cursor.fetchone()
-            return dict(row) if row else None
-        finally:
-            conn.close()
+    row = execute_one(
+        """
+        SELECT id, full_name, email, created_at, last_login
+        FROM users WHERE email = %s
+        """,
+        (email.lower().strip(),)
+    )
+    if not row:
+        return None
+    return {
+        "id":         row["id"],
+        "full_name":  row["full_name"],
+        "email":      row["email"],
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+        "last_login": row["last_login"].isoformat() if row["last_login"] else None,
+    }
