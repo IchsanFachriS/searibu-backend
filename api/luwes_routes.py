@@ -1,11 +1,11 @@
 """
-Flask Routes — Luwes Water Level
+Flask Routes — Luwes Water Level (PostgreSQL version)
 
 Endpoints:
-  GET /api/luwes/level          → data terbaru dari DB (atau fetch jika kosong)
-  GET /api/luwes/history        → history data (query by date range), RAW tanpa preprocessing
+  GET /api/luwes/level          → data terbaru dari DB
+  GET /api/luwes/history        → history data (query by date range)
   GET /api/luwes/status         → status scheduler + statistik DB
-  POST /api/luwes/fetch         → trigger manual fetch sekarang (admin/debug)
+  POST /api/luwes/fetch         → trigger manual fetch sekarang
   GET /api/luwes/overlay        → data luwes RAW + prediksi TPXO untuk tanggal & lokasi tertentu
 """
 
@@ -23,12 +23,6 @@ luwes_bp = Blueprint("luwes", __name__, url_prefix="/api/luwes")
 
 @luwes_bp.route("/level")
 def api_get_level():
-    """
-    GET /api/luwes/level
-    GET /api/luwes/level?imei=<custom_imei>
-
-    Mengembalikan data water level terbaru dari DB (RAW, tanpa preprocessing).
-    """
     imei = request.args.get("imei", LUWES_IMEI)
     try:
         data = get_latest_level(imei)
@@ -41,13 +35,6 @@ def api_get_level():
 
 @luwes_bp.route("/history")
 def api_get_history():
-    """
-    GET /api/luwes/history
-    GET /api/luwes/history?imei=<imei>&start=YYYY-MM-DD&end=YYYY-MM-DD
-
-    Mengembalikan history data water level dari DB (RAW, tanpa preprocessing/smoothing).
-    Default: 7 hari terakhir jika start/end tidak diberikan.
-    """
     imei       = request.args.get("imei", LUWES_IMEI)
     start_date = request.args.get("start")
     end_date   = request.args.get("end")
@@ -75,7 +62,6 @@ def api_get_history():
 
 @luwes_bp.route("/status")
 def api_get_status():
-    """GET /api/luwes/status — status scheduler + statistik database."""
     try:
         status = get_scheduler_status()
         return jsonify(status), 200
@@ -85,7 +71,6 @@ def api_get_status():
 
 @luwes_bp.route("/fetch", methods=["POST"])
 def api_trigger_fetch():
-    """POST /api/luwes/fetch — trigger manual fetch dari Luwes API sekarang."""
     imei = request.args.get("imei", LUWES_IMEI)
     result = trigger_fetch_now(imei)
     if "error" in result:
@@ -101,24 +86,6 @@ def api_get_overlay():
     Mengembalikan data gabungan:
       - luwes_obs : observasi RAW dari stasiun Luwes untuk tanggal tersebut
       - tpxo      : prediksi TPXO untuk lokasi & tanggal yang sama (interval 1 jam)
-
-    Query params:
-      date  : tanggal (YYYY-MM-DD), default hari ini WIB
-      lon   : longitude lokasi TPXO (float, wajib)
-      lat   : latitude lokasi TPXO  (float, wajib)
-      imei  : IMEI stasiun Luwes (opsional, default LUWES_IMEI)
-
-    Response 200:
-    {
-        "date":       "2026-03-10",
-        "imei":       "869556066101370",
-        "lon":        106.58,
-        "lat":        -5.60,
-        "luwes_obs":  [{"recorded_at": "...", "level_m": 1.234}, ...],
-        "tpxo":       [{"time": "...", "height": 0.456}, ...],
-        "luwes_stats": {"max_m": ..., "min_m": ..., "count": ...},
-        "tpxo_stats":  {"max": ..., "min": ..., "mean": ..., "range": ...}
-    }
     """
     import os
     import sys
@@ -147,7 +114,6 @@ def api_get_overlay():
     if not (-90 <= lat <= 90):
         return jsonify({"error": "lat harus antara -90 dan 90"}), 400
 
-    # Tanggal
     if date_str:
         try:
             datetime.strptime(date_str, "%Y-%m-%d")
@@ -156,19 +122,15 @@ def api_get_overlay():
     else:
         date_str = datetime.now(WIB).strftime("%Y-%m-%d")
 
-    # ── Fetch Luwes RAW ──────────────────────────────────────
+    # ── Fetch Luwes RAW dari PostgreSQL ──────────────────────
     try:
-        from .luwes_db import get_by_date_range, _connect
-        import os as _os
-        luwes_db = _os.getenv("LUWES_DB_PATH", "data/luwes_raw.db")
+        # PostgreSQL mode: db_path = "" (diabaikan oleh pg_db)
+        from .luwes_db import get_by_date_range
 
         start_str = f"{date_str}T00:00:00+07:00"
         end_str   = f"{date_str}T23:59:59+07:00"
 
-        from .luwes_service import _db_path as luwes_db_path
-        db = luwes_db_path or luwes_db
-
-        rows = get_by_date_range(db, imei, start_str, end_str, limit=10000)
+        rows = get_by_date_range("", imei, start_str, end_str, limit=10000)
         luwes_obs = [
             {"recorded_at": r["recorded_at"], "level_m": r["level_m"]}
             for r in rows if r.get("level_m") is not None
@@ -187,17 +149,16 @@ def api_get_overlay():
     except Exception as exc:
         return jsonify({"error": f"Gagal ambil data Luwes: {exc}"}), 500
 
-    # ── Fetch TPXO ───────────────────────────────────────────
+    # ── Fetch TPXO (tetap SQLite) ─────────────────────────────
     try:
         sys.path.insert(0, str(Path(__file__).parent.parent))
         from core.tpxo_predictor import TPXOPredictor
 
-        db_path = _os.getenv("DATABASE_PATH", "data/tpxo_seribu.db")
+        db_path = os.getenv("DATABASE_PATH", "data/tpxo_seribu.db")
         predictor = TPXOPredictor(db_path)
         predictor.connect()
 
         start_dt = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        # end_dt = next day 00:00:00 — backend requires end_date strictly after start_date
         end_dt   = start_dt + timedelta(days=1)
 
         tpxo_result = predictor.predict(
