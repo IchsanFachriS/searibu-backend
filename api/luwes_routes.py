@@ -150,27 +150,38 @@ def api_get_overlay():
         return jsonify({"error": f"Gagal ambil data Luwes: {exc}"}), 500
 
     # ── Fetch TPXO (tetap SQLite) ─────────────────────────────
+    tpxo_predictions = []
+    tpxo_stats       = {}
+    tpxo_error       = None
+
     try:
         sys.path.insert(0, str(Path(__file__).parent.parent))
         from core.tpxo_predictor import TPXOPredictor
 
         db_path = os.getenv("DATABASE_PATH", "data/tpxo_seribu.db")
-        predictor = TPXOPredictor(db_path)
-        predictor.connect()
 
-        start_dt = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        end_dt   = start_dt + timedelta(days=1)
+        if not Path(db_path).exists():
+            tpxo_error = f"File TPXO tidak ditemukan di path: {db_path}"
+        else:
+            predictor = TPXOPredictor(db_path)
+            predictor.connect()
 
-        tpxo_result = predictor.predict(
-            lon=lon, lat=lat,
-            start_dt=start_dt, end_dt=end_dt,
-            interval_hours=1,
-        )
-        tpxo_predictions = tpxo_result.get("predictions", [])
-        tpxo_stats       = tpxo_result.get("statistics", {})
+            start_dt = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            end_dt   = start_dt + timedelta(days=1)
 
+            tpxo_result      = predictor.predict(
+                lon=lon, lat=lat,
+                start_dt=start_dt, end_dt=end_dt,
+                interval_hours=1,
+            )
+            tpxo_predictions = tpxo_result.get("predictions", [])
+            tpxo_stats       = tpxo_result.get("statistics", {})
+            predictor.close()
+
+    except FileNotFoundError as exc:
+        tpxo_error = f"File TPXO tidak ditemukan: {exc}"
     except Exception as exc:
-        return jsonify({"error": f"Gagal ambil prediksi TPXO: {exc}"}), 500
+        tpxo_error = f"Gagal ambil prediksi TPXO: {exc}"
 
     return jsonify({
         "date":        date_str,
@@ -181,4 +192,5 @@ def api_get_overlay():
         "tpxo":        tpxo_predictions,
         "luwes_stats": luwes_stats,
         "tpxo_stats":  tpxo_stats,
+        "tpxo_error":  tpxo_error,   # None jika sukses, string error jika gagal
     }), 200
