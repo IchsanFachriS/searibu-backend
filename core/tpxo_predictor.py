@@ -157,7 +157,7 @@ def astronomical_args(dt: datetime) -> Dict[str, float]:
 
     Formulas: Schureman (1958) Table 1, using Julian centuries from J1900.
     """
-    T = (julian_day(dt) - _JD_J1900) / 36524.25  # Julian centuries from J1900
+    T = (julian_day(dt) - _JD_J1900) / 36525.0  # Julian centuries from J1900
 
     s  = (277.0247 + 481267.8906 * T) % 360.0
     h  = (280.1895 +  36000.7689 * T) % 360.0
@@ -209,7 +209,6 @@ def equilibrium_arguments(astro: Dict[str, float]) -> Dict[str, float]:
     V0["n2"]  = (2*h - 3*s + p) % 360.0
     V0["k2"]  = (2*h) % 360.0
     V0["2n2"] = (2*h - 4*s + 2*p) % 360.0
-    V0["nu2"] = (2*h - 3*s + 4*h - p) % 360.0   # ν₂ = 2T−3s+4h−p → V₀ = 4h−3s−p
     V0["nu2"] = (4*h - 3*s - p) % 360.0
     V0["mu2"] = (4*h - 4*s) % 360.0
     V0["l2"]  = (2*h - s - p + 180.0) % 360.0   # +π from Schureman
@@ -280,7 +279,7 @@ def nodal_corrections(N_deg: float) -> Tuple[Dict[str, float], Dict[str, float]]
 
     # ── K2 ────────────────────────────────────────────────────────────────
     fK2_x = 1.0 + 0.2852*math.cos(Nr) + 0.0324*math.cos(N2r)
-    fK2_y =       0.3108*math.sin(Nr) + 0.0324*math.sin(N2r)
+    fK2_y =       0.3108*math.sin(Nr) + 0.0328*math.sin(N2r)
     f_K2 = math.hypot(fK2_x, fK2_y)
     u_K2 = _atan2d(-fK2_y, fK2_x)
 
@@ -294,7 +293,7 @@ def nodal_corrections(N_deg: float) -> Tuple[Dict[str, float], Dict[str, float]]
     fO1_x = 1.0 - 0.10980*math.cos(Nr) + 0.00148*math.cos(N2r)
     fO1_y =       0.10980*math.sin(Nr) - 0.00148*math.sin(N2r)
     f_O1 = math.hypot(fO1_x, fO1_y)
-    u_O1 = _atan2d(fO1_y, fO1_x)           # O1 sign convention opposite to M2
+    u_O1 = _atan2d(-fO1_y, fO1_x)           # O1 sign convention opposite to M2
 
     # ── Mf  (Schureman Table 14) ──────────────────────────────────────────
     fMf_x = 1.0 - 0.15636*math.cos(Nr)
@@ -317,8 +316,8 @@ def nodal_corrections(N_deg: float) -> Tuple[Dict[str, float], Dict[str, float]]
     # ── Compound constituents ──────────────────────────────────────────────
     f_M4   = f_M2**2
     u_M4   = 2.0 * u_M2
-    f_MN4  = f_M2**2                        # same as M4 for nodal factor
-    u_MN4  = 2.0 * u_M2                     # approximate (N2 ≈ M2 for u)
+    f_MN4  = f_M2 * f_M2                        # same as M4 for nodal factor
+    u_MN4  = u_M2 +u_M2                     # approximate (N2 ≈ M2 for u)
     f_MS4  = f_M2                           # M2 × S2; S2 has f=1
     u_MS4  = u_M2
 
