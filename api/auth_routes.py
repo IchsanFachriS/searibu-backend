@@ -16,9 +16,8 @@ auth_bp = Blueprint("auth", __name__, url_prefix="/api/auth")
 _auth_db_path: str | None = None
 
 
-def setup_auth(db_path: str):
-    global _auth_db_path
-    _auth_db_path = db_path
+def setup_auth(db_path: str = None):
+    pass
 
 
 def _require_db() -> str:
