@@ -1,19 +1,16 @@
--- ============================================================
--- Searibu — PostgreSQL Schema (Supabase)
--- Migration dari SQLite: auth.db + luwes_raw.db + billing.db
+-- Searibu PostgreSQL schema — run once in the Supabase SQL editor.
 --
--- Jalankan di Supabase SQL Editor:
---   1. Buka https://supabase.com/dashboard
---   2. Pilih project → SQL Editor → New Query
---   3. Paste seluruh file ini → Run
--- ============================================================
+-- Tables:
+--   users                      authentication
+--   water_level_observations   Luwes telemetry records
+--   fetch_log                  scheduler fetch audit log
+--   subscriptions              user billing plan
+--   payments                   Midtrans payment records
 
--- ── Extensions ─────────────────────────────────────────────
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
--- ============================================================
--- 1. TABEL USERS  (dari auth.db)
--- ============================================================
+-- ── Users ────────────────────────────────────────────────────────────────────
+
 CREATE TABLE IF NOT EXISTS users (
     id            SERIAL PRIMARY KEY,
     full_name     TEXT        NOT NULL,
@@ -26,12 +23,11 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 
--- ============================================================
--- 2. TABEL WATER LEVEL OBSERVATIONS  (dari luwes_raw.db)
--- ============================================================
+-- ── Water level observations ─────────────────────────────────────────────────
+
 CREATE TABLE IF NOT EXISTS water_level_observations (
     id           SERIAL PRIMARY KEY,
-    rec          INTEGER     NOT NULL UNIQUE,   -- ID unik dari Luwes API
+    rec          INTEGER     NOT NULL UNIQUE,
     station_id   INTEGER,
     station_name TEXT,
     imei         TEXT,
@@ -44,14 +40,13 @@ CREATE INDEX IF NOT EXISTS idx_obs_recorded_at ON water_level_observations(recor
 CREATE INDEX IF NOT EXISTS idx_obs_imei        ON water_level_observations(imei);
 CREATE INDEX IF NOT EXISTS idx_obs_rec         ON water_level_observations(rec);
 
--- ============================================================
--- 3. TABEL FETCH LOG  (dari luwes_raw.db)
--- ============================================================
+-- ── Fetch log ─────────────────────────────────────────────────────────────────
+
 CREATE TABLE IF NOT EXISTS fetch_log (
     id          SERIAL PRIMARY KEY,
     fetched_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     imei        TEXT,
-    status      TEXT,          -- 'ok' | 'duplicate' | 'error'
+    status      TEXT,
     rec         INTEGER,
     level_m     REAL,
     recorded_at TIMESTAMPTZ,
@@ -60,16 +55,13 @@ CREATE TABLE IF NOT EXISTS fetch_log (
 
 CREATE INDEX IF NOT EXISTS idx_fetch_log_imei_time ON fetch_log(imei, fetched_at);
 
--- ============================================================
--- 4. TABEL SUBSCRIPTIONS  (dari billing.db)
--- ============================================================
+-- ── Subscriptions ─────────────────────────────────────────────────────────────
+
 CREATE TABLE IF NOT EXISTS subscriptions (
     id          SERIAL PRIMARY KEY,
     user_id     INTEGER     NOT NULL UNIQUE REFERENCES users(id),
     plan        TEXT        NOT NULL DEFAULT 'free',
-        -- 'free' | 'pro_monthly' | 'pro_annual'
     status      TEXT        NOT NULL DEFAULT 'active',
-        -- 'active' | 'expired' | 'cancelled'
     starts_at   TIMESTAMPTZ,
     expires_at  TIMESTAMPTZ,
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -77,9 +69,8 @@ CREATE TABLE IF NOT EXISTS subscriptions (
 
 CREATE INDEX IF NOT EXISTS idx_sub_user ON subscriptions(user_id);
 
--- ============================================================
--- 5. TABEL PAYMENTS  (dari billing.db)
--- ============================================================
+-- ── Payments ──────────────────────────────────────────────────────────────────
+
 CREATE TABLE IF NOT EXISTS payments (
     id            SERIAL PRIMARY KEY,
     user_id       INTEGER     NOT NULL REFERENCES users(id),
@@ -88,7 +79,6 @@ CREATE TABLE IF NOT EXISTS payments (
     plan          TEXT        NOT NULL,
     amount_idr    INTEGER     NOT NULL,
     status        TEXT        NOT NULL DEFAULT 'pending',
-        -- 'pending' | 'settlement' | 'expire' | 'cancel' | 'deny'
     midtrans_id   TEXT,
     payment_type  TEXT,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -100,22 +90,9 @@ CREATE INDEX IF NOT EXISTS idx_payments_order  ON payments(order_id);
 CREATE INDEX IF NOT EXISTS idx_payments_user   ON payments(user_id);
 CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status);
 
--- ============================================================
--- 6. ROW LEVEL SECURITY (RLS) — opsional tapi direkomendasikan
---    Aktifkan jika menggunakan Supabase Auth atau API langsung
--- ============================================================
-
--- Nonaktifkan RLS untuk tabel yang hanya diakses via backend
--- (backend menggunakan service_role key yang bypass RLS)
-ALTER TABLE users                      DISABLE ROW LEVEL SECURITY;
-ALTER TABLE water_level_observations   DISABLE ROW LEVEL SECURITY;
-ALTER TABLE fetch_log                  DISABLE ROW LEVEL SECURITY;
-ALTER TABLE subscriptions              DISABLE ROW LEVEL SECURITY;
-ALTER TABLE payments                   DISABLE ROW LEVEL SECURITY;
-
--- ============================================================
--- Verifikasi — jalankan setelah migration untuk cek tabel
--- ============================================================
--- SELECT table_name FROM information_schema.tables
--- WHERE table_schema = 'public'
--- ORDER BY table_name;
+-- Disable RLS for tables accessed exclusively via the backend service role.
+ALTER TABLE users                    DISABLE ROW LEVEL SECURITY;
+ALTER TABLE water_level_observations DISABLE ROW LEVEL SECURITY;
+ALTER TABLE fetch_log                DISABLE ROW LEVEL SECURITY;
+ALTER TABLE subscriptions            DISABLE ROW LEVEL SECURITY;
+ALTER TABLE payments                 DISABLE ROW LEVEL SECURITY;

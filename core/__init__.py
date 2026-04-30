@@ -1,3 +1,3 @@
-"""Core Package"""
-# Import baru — hapus referensi ke tpxo_predictor_db
+"""Searibu core computation package."""
+
 from .tpxo_predictor import TPXOPredictor

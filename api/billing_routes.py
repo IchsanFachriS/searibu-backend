@@ -1,9 +1,10 @@
-"""
+"""Billing Flask blueprint.
+
 Endpoints:
-  POST /api/create-payment              → buat Midtrans Snap token
-  POST /api/midtrans-webhook            → terima notifikasi Midtrans
-  GET  /api/subscription                → status subscription user
-  POST /api/subscription/check-access  → feature gate check
+    POST /api/create-payment             — create a Midtrans Snap token
+    POST /api/midtrans-webhook           — receive Midtrans payment notifications
+    GET  /api/subscription               — return the current subscription status
+    POST /api/subscription/check-access  — feature gate check
 """
 
 import os
@@ -15,172 +16,117 @@ import requests
 from flask import Blueprint, jsonify, request
 
 from .billing_db import (
-    PLAN_CONFIG, create_payment, settle_payment,
-    update_payment_status, upsert_subscription,
-    get_subscription, init_billing_db, is_pro,
+    PLAN_CONFIG,
+    create_payment,
+    settle_payment,
+    update_payment_status,
+    upsert_subscription,
+    get_subscription,
+    init_billing_db,
 )
 from .auth_db import get_user_by_email, create_user
 
 logger = logging.getLogger(__name__)
+
 billing_bp = Blueprint("billing", __name__, url_prefix="/api")
 
 _billing_db: str | None = None
 _mt_server_key: str | None = None
 _mt_is_production: bool = False
 
+_PRO_ONLY_FEATURES = {"s104_export", "forecast_14d", "activity_full", "luwes_overlay"}
 
-def setup_billing(db_path: str):
+
+def setup_billing(db_path: str) -> None:
+    """Initialise billing configuration. Call once at application startup."""
     global _billing_db, _mt_server_key, _mt_is_production
     _billing_db = db_path
-
-    _mt_server_key    = os.getenv("MIDTRANS_SERVER_KEY", "")
+    _mt_server_key = os.getenv("MIDTRANS_SERVER_KEY", "")
     _mt_is_production = os.getenv("MIDTRANS_ENV", "sandbox").lower() == "production"
 
     if not _mt_server_key:
-        logger.warning(
-            "MIDTRANS_SERVER_KEY tidak di-set. Payment creation akan gagal."
-        )
+        logger.warning("MIDTRANS_SERVER_KEY not set — payment creation will fail")
 
     init_billing_db(db_path)
-    logger.info(
-        f"Billing setup: env={'production' if _mt_is_production else 'sandbox'}"
-    )
+    logger.info("Billing module ready (env=%s)", "production" if _mt_is_production else "sandbox")
 
 
 def _db() -> str:
-    if not _billing_db:
-        raise RuntimeError("Billing DB not initialised — call setup_billing() first.")
+    if _billing_db is None:
+        raise RuntimeError("Billing not initialised — call setup_billing() first")
     return _billing_db
 
 
-def _midtrans_snap_url() -> str:
-    if _mt_is_production:
-        return "https://app.midtrans.com/snap/v1/transactions"
-    return "https://app.sandbox.midtrans.com/snap/v1/transactions"
+def _snap_url() -> str:
+    base = "app.midtrans.com" if _mt_is_production else "app.sandbox.midtrans.com"
+    return f"https://{base}/snap/v1/transactions"
 
 
 def _get_or_create_user(email: str) -> int:
-    """
-    Ambil user_id berdasarkan email, atau buat akun guest jika belum ada.
-    Langsung ke PostgreSQL via auth_db (tanpa db_path).
-    """
     user = get_user_by_email(email)
     if user:
         return user["id"]
-
-    # Buat akun minimal agar user bisa login kemudian via Google / password
-    new_user = create_user(
-        email.split("@")[0].replace(".", " ").title(),
-        email,
-        uuid.uuid4().hex,   # random password
-    )
+    new_user = create_user(email.split("@")[0].replace(".", " ").title(), email, uuid.uuid4().hex)
     return new_user["id"]
 
 
-# ── POST /api/create-payment ──────────────────────────────────────────────────
-
 @billing_bp.route("/create-payment", methods=["POST"])
 def create_payment_endpoint():
-    data  = request.get_json(silent=True) or {}
-    plan  = data.get("plan", "")
+    data = request.get_json(silent=True) or {}
+    plan = data.get("plan", "")
     email = (data.get("email") or "").strip().lower()
 
     if plan not in PLAN_CONFIG:
-        return jsonify({
-            "error": f"Unknown plan: {plan}. Must be one of: {list(PLAN_CONFIG.keys())}"
-        }), 400
-
+        return jsonify({"error": f"Unknown plan '{plan}'. Valid: {list(PLAN_CONFIG)}"}), 400
     if not email or "@" not in email:
         return jsonify({"error": "A valid email address is required"}), 400
-
     if not _mt_server_key:
-        logger.error("MIDTRANS_SERVER_KEY is not configured")
-        return jsonify({
-            "error": "Payment service is not configured. Please contact the administrator.",
-            "hint":  "Set the MIDTRANS_SERVER_KEY environment variable."
-        }), 503
+        return jsonify({"error": "Payment service is not configured"}), 503
 
-    cfg      = PLAN_CONFIG[plan]
-    amount   = cfg["amount"]
+    cfg = PLAN_CONFIG[plan]
     order_id = f"searibu-{uuid.uuid4().hex[:16]}"
 
     try:
         user_id = _get_or_create_user(email)
-    except Exception as e:
-        logger.error(f"Failed to get/create user for {email}: {e}")
+    except Exception as exc:
+        logger.error("Failed to resolve user for %s: %s", email, exc)
         return jsonify({"error": "Failed to resolve user account"}), 500
 
     payload = {
-        "transaction_details": {
-            "order_id":     order_id,
-            "gross_amount": amount,
-        },
-        "customer_details": {
-            "email": email,
-        },
-        "item_details": [
-            {
-                "id":       plan,
-                "price":    amount,
-                "quantity": 1,
-                "name":     f"Searibu {plan.replace('_', ' ').title()}",
-            }
-        ],
-        "credit_card": {
-            "secure": True,
-        },
+        "transaction_details": {"order_id": order_id, "gross_amount": cfg["amount"]},
+        "customer_details": {"email": email},
+        "item_details": [{"id": plan, "price": cfg["amount"], "quantity": 1, "name": f"Searibu {plan.replace('_', ' ').title()}"}],
+        "credit_card": {"secure": True},
     }
 
-    snap_url = _midtrans_snap_url()
-    logger.info(f"Creating payment: order_id={order_id}, plan={plan}, email={email}")
-
     try:
-        resp = requests.post(
-            snap_url,
-            json=payload,
-            auth=(_mt_server_key, ""),
-            timeout=15,
-        )
+        resp = requests.post(_snap_url(), json=payload, auth=(_mt_server_key, ""), timeout=15)
 
         if resp.status_code != 201:
-            logger.error(f"Midtrans error {resp.status_code}: {resp.text[:500]}")
             try:
-                mt_error = resp.json()
-                detail = mt_error.get("error_messages", resp.text[:300])
+                detail = resp.json().get("error_messages", resp.text[:300])
             except Exception:
                 detail = resp.text[:300]
-            return jsonify({
-                "error":       "Midtrans API returned an error",
-                "status_code": resp.status_code,
-                "detail":      detail,
-            }), 502
+            logger.error("Midtrans error %d: %s", resp.status_code, detail)
+            return jsonify({"error": "Midtrans API error", "status_code": resp.status_code, "detail": detail}), 502
 
-        mt_data    = resp.json()
+        mt_data = resp.json()
         snap_token = mt_data.get("token", "")
-
         if not snap_token:
-            logger.error(f"No token in Midtrans response: {mt_data}")
             return jsonify({"error": "Midtrans did not return a payment token"}), 502
 
-        create_payment(_db(), user_id, order_id, snap_token, plan, amount)
-
-        logger.info(f"Payment created: order_id={order_id}")
-        return jsonify({
-            "snap_token":   snap_token,
-            "order_id":     order_id,
-            "redirect_url": mt_data.get("redirect_url"),
-        })
+        create_payment(_db(), user_id, order_id, snap_token, plan, cfg["amount"])
+        logger.info("Payment created: order_id=%s plan=%s email=%s", order_id, plan, email)
+        return jsonify({"snap_token": snap_token, "order_id": order_id, "redirect_url": mt_data.get("redirect_url")})
 
     except requests.exceptions.Timeout:
-        return jsonify({"error": "Payment gateway timed out. Please try again."}), 504
-    except requests.exceptions.ConnectionError as e:
-        return jsonify({"error": "Cannot reach payment gateway. Please try again."}), 502
-    except Exception as e:
-        logger.error(f"Unexpected error creating payment: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Payment gateway timed out"}), 504
+    except requests.exceptions.ConnectionError:
+        return jsonify({"error": "Cannot reach payment gateway"}), 502
+    except Exception as exc:
+        logger.error("Unexpected payment error: %s", exc, exc_info=True)
+        return jsonify({"error": str(exc)}), 500
 
-
-# ── POST /api/midtrans-webhook ────────────────────────────────────────────────
 
 @billing_bp.route("/midtrans-webhook", methods=["POST", "OPTIONS"])
 def midtrans_webhook():
@@ -188,100 +134,75 @@ def midtrans_webhook():
         return "", 200
 
     body = request.get_json(silent=True) or {}
-    raw  = json.dumps(body)
+    raw = json.dumps(body)
 
-    order_id           = body.get("order_id", "")
+    order_id = body.get("order_id", "")
     transaction_status = body.get("transaction_status", "")
-    fraud_status       = body.get("fraud_status", "accept")
-    midtrans_id        = body.get("transaction_id", "")
-    payment_type       = body.get("payment_type", "")
-    gross_amount       = body.get("gross_amount", "0")
-    status_code        = body.get("status_code", "")
-    signature_key      = body.get("signature_key", "")
+    fraud_status = body.get("fraud_status", "accept")
+    midtrans_id = body.get("transaction_id", "")
+    payment_type = body.get("payment_type", "")
+    gross_amount = body.get("gross_amount", "0")
+    status_code = body.get("status_code", "")
+    signature_key = body.get("signature_key", "")
 
-    logger.info(
-        f"Webhook: order_id={order_id}, status={transaction_status}, fraud={fraud_status}"
-    )
+    logger.info("Webhook: order_id=%s status=%s fraud=%s", order_id, transaction_status, fraud_status)
 
-    # Verifikasi signature
     if _mt_server_key and signature_key:
-        raw_str  = f"{order_id}{status_code}{gross_amount}{_mt_server_key}"
-        expected = hashlib.sha512(raw_str.encode("utf-8")).hexdigest()
+        expected = hashlib.sha512(
+            f"{order_id}{status_code}{gross_amount}{_mt_server_key}".encode()
+        ).hexdigest()
         if signature_key.lower() != expected.lower():
-            logger.warning(f"Webhook signature mismatch: order_id={order_id}")
+            logger.warning("Webhook signature mismatch: order_id=%s", order_id)
             return jsonify({"error": "Invalid signature"}), 403
     elif not _mt_server_key:
-        logger.warning("No server key — skipping webhook signature check")
+        logger.warning("No server key — skipping webhook signature verification")
 
     try:
-        if transaction_status in ("settlement",) or (
-            transaction_status == "capture" and fraud_status == "accept"
-        ):
+        if transaction_status == "settlement" or (transaction_status == "capture" and fraud_status == "accept"):
             payment = settle_payment(_db(), order_id, midtrans_id, payment_type, raw)
             if payment:
-                cfg  = PLAN_CONFIG.get(payment["plan"], {})
-                days = cfg.get("days", 30)
+                days = PLAN_CONFIG.get(payment["plan"], {}).get("days", 30)
                 upsert_subscription(_db(), payment["user_id"], payment["plan"], days)
-                logger.info(
-                    f"Subscription activated: user_id={payment['user_id']}, "
-                    f"plan={payment['plan']}, days={days}"
-                )
-            else:
-                logger.warning(f"settle_payment returned None for order_id={order_id}")
-
+                logger.info("Subscription activated: user_id=%s plan=%s", payment["user_id"], payment["plan"])
         elif transaction_status == "pending":
             update_payment_status(_db(), order_id, "pending", raw)
-
         elif transaction_status in ("deny", "cancel", "expire", "failure"):
             update_payment_status(_db(), order_id, transaction_status, raw)
-
         else:
             update_payment_status(_db(), order_id, transaction_status, raw)
-
-    except Exception as e:
-        logger.error(f"Error processing webhook for {order_id}: {e}", exc_info=True)
-        return jsonify({"status": "error", "message": str(e)}), 200
+    except Exception as exc:
+        logger.error("Webhook processing error for %s: %s", order_id, exc, exc_info=True)
+        return jsonify({"status": "error", "message": str(exc)}), 200
 
     return jsonify({"status": "ok"})
 
 
-# ── GET /api/subscription ─────────────────────────────────────────────────────
-
 @billing_bp.route("/subscription", methods=["GET"])
 def get_subscription_endpoint():
     user_id_raw = request.args.get("user_id")
-    email       = (request.args.get("email") or "").strip().lower()
+    email = (request.args.get("email") or "").strip().lower()
 
     if user_id_raw:
         try:
             user_id = int(user_id_raw)
         except ValueError:
             return jsonify({"error": "user_id must be an integer"}), 400
-
     elif email:
         user = get_user_by_email(email)
         if not user:
-            return jsonify({
-                "plan":       "free",
-                "status":     "active",
-                "expires_at": None,
-            })
+            return jsonify({"plan": "free", "status": "active", "expires_at": None})
         user_id = user["id"]
-
     else:
         return jsonify({"error": "Provide either user_id or email query parameter"}), 400
 
-    sub = get_subscription(_db(), user_id)
-    return jsonify(sub)
+    return jsonify(get_subscription(_db(), user_id))
 
-
-# ── POST /api/subscription/check-access ──────────────────────────────────────
 
 @billing_bp.route("/subscription/check-access", methods=["POST"])
 def check_access():
-    data    = request.get_json(silent=True) or {}
+    data = request.get_json(silent=True) or {}
     feature = data.get("feature", "")
-    email   = (data.get("email") or "").strip().lower()
+    email = (data.get("email") or "").strip().lower()
     user_id = data.get("user_id")
 
     if not user_id and email:
@@ -289,28 +210,12 @@ def check_access():
         user_id = user["id"] if user else None
 
     if not user_id:
-        return jsonify({
-            "allowed": False,
-            "reason":  "Not authenticated",
-            "plan":    "free",
-        }), 200
+        return jsonify({"allowed": False, "reason": "Not authenticated", "plan": "free"}), 200
 
-    pro_only = {"s104_export", "forecast_14d", "activity_full", "luwes_overlay"}
     sub = get_subscription(_db(), int(user_id))
-    pro_active = (
-        sub.get("plan") in ("pro_monthly", "pro_annual")
-        and sub.get("status") == "active"
-    )
+    pro_active = sub.get("plan") in ("pro_monthly", "pro_annual") and sub.get("status") == "active"
 
-    if feature in pro_only and not pro_active:
-        return jsonify({
-            "allowed": False,
-            "reason":  f"Feature '{feature}' requires an active Pro subscription",
-            "plan":    sub.get("plan", "free"),
-        })
+    if feature in _PRO_ONLY_FEATURES and not pro_active:
+        return jsonify({"allowed": False, "reason": f"'{feature}' requires a Pro subscription", "plan": sub.get("plan", "free")})
 
-    return jsonify({
-        "allowed": True,
-        "reason":  "ok",
-        "plan":    sub.get("plan", "free"),
-    })
+    return jsonify({"allowed": True, "reason": "ok", "plan": sub.get("plan", "free")})

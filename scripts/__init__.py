@@ -1,1 +1,1 @@
-"""Scripts Package"""
+"""One-time utility scripts — not deployed to Railway."""

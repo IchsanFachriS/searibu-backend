@@ -1,77 +1,65 @@
-"""
-billing_db.py — PostgreSQL version
-Menggantikan implementasi SQLite sebelumnya.
+"""Billing database operations (PostgreSQL).
 
-API publik identik sehingga billing_routes.py tidak perlu diubah banyak.
+Tables managed:
+    subscriptions — user plan and expiry
+    payments      — Midtrans payment records
+
+Schema is created via migrations/001_initial_schema.sql.
 """
 
+import json
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict
 
-from .pg_db import get_cursor, execute_one, execute_returning, execute_write
+from .pg_db import execute_one, execute_returning, execute_write
 
 logger = logging.getLogger(__name__)
 WIB = timezone(timedelta(hours=7))
 
 PLAN_CONFIG = {
-    "pro_monthly": {"amount": 39000,  "days": 30},
-    "pro_annual":  {"amount": 139000, "days": 365},
+    "pro_monthly": {"amount": 39_000, "days": 30},
+    "pro_annual": {"amount": 139_000, "days": 365},
 }
 
 
-# ── No-op: tabel dibuat via SQL migration ────────────────────
-def init_billing_db(db_path: str = None):
-    """No-op di PostgreSQL mode."""
-    logger.info("[billing_db] PostgreSQL mode — tabel sudah ada via migration SQL")
+def init_billing_db(db_path: str = None) -> None:
+    """No-op — kept for backward-compatibility with app.py startup sequence."""
+    logger.debug("billing_db: PostgreSQL mode — schema managed via migration SQL")
 
-
-# ══════════════════════════════════════════════════════════════
-# SUBSCRIPTIONS
-# ══════════════════════════════════════════════════════════════
 
 def get_subscription(db_path: str, user_id: int) -> Dict:
+    """Return the subscription record for a user.
+
+    Falls back to a default free-plan dict if no record exists.
+    Auto-expires the subscription in the database if expires_at has passed.
     """
-    Ambil subscription untuk user_id.
-    Jika tidak ada, kembalikan default free plan.
-    Auto-expire jika expires_at sudah lewat.
-    """
-    row = execute_one(
-        "SELECT * FROM subscriptions WHERE user_id = %s",
-        (user_id,)
-    )
+    row = execute_one("SELECT * FROM subscriptions WHERE user_id = %s", (user_id,))
     if not row:
         return {"plan": "free", "status": "active", "expires_at": None, "user_id": user_id}
 
     sub = dict(row)
-
-    # Auto-expire check
     exp = sub.get("expires_at")
     if exp and sub.get("status") == "active":
         now = datetime.now(timezone.utc)
-        if hasattr(exp, "tzinfo"):
-            exp_aware = exp if exp.tzinfo else exp.replace(tzinfo=timezone.utc)
-        else:
-            exp_aware = datetime.fromisoformat(str(exp)).replace(tzinfo=timezone.utc)
-
+        exp_aware = exp if getattr(exp, "tzinfo", None) else exp.replace(tzinfo=timezone.utc)
         if exp_aware < now:
             execute_write(
                 "UPDATE subscriptions SET status = 'expired', updated_at = NOW() WHERE user_id = %s",
-                (user_id,)
+                (user_id,),
             )
             sub["status"] = "expired"
 
-    # Serialise datetimes
-    for k in ("starts_at", "expires_at", "updated_at"):
-        v = sub.get(k)
-        if v and hasattr(v, "isoformat"):
-            sub[k] = v.isoformat()
+    for key in ("starts_at", "expires_at", "updated_at"):
+        val = sub.get(key)
+        if val and hasattr(val, "isoformat"):
+            sub[key] = val.isoformat()
 
     return sub
 
 
 def upsert_subscription(db_path: str, user_id: int, plan: str, days: int) -> Dict:
-    """INSERT atau UPDATE subscription untuk user_id."""
+    """Insert or update a subscription for the given user."""
     row = execute_returning(
         """
         INSERT INTO subscriptions (user_id, plan, status, starts_at, expires_at, updated_at)
@@ -86,43 +74,43 @@ def upsert_subscription(db_path: str, user_id: int, plan: str, days: int) -> Dic
                   starts_at  AT TIME ZONE 'UTC' AS starts_at,
                   expires_at AT TIME ZONE 'UTC' AS expires_at
         """,
-        (user_id, plan, days)
+        (user_id, plan, days),
     )
     result = dict(row)
-    for k in ("starts_at", "expires_at"):
-        if result.get(k) and hasattr(result[k], "isoformat"):
-            result[k] = result[k].isoformat()
+    for key in ("starts_at", "expires_at"):
+        if result.get(key) and hasattr(result[key], "isoformat"):
+            result[key] = result[key].isoformat()
     return result
 
 
-# ══════════════════════════════════════════════════════════════
-# PAYMENTS
-# ══════════════════════════════════════════════════════════════
-
 def create_payment(
-    db_path: str, user_id: int, order_id: str,
-    snap_token: str, plan: str, amount: int
+    db_path: str,
+    user_id: int,
+    order_id: str,
+    snap_token: str,
+    plan: str,
+    amount: int,
 ) -> int:
-    """Insert payment baru, return id."""
+    """Insert a new pending payment record and return its id."""
     row = execute_returning(
         """
-        INSERT INTO payments
-            (user_id, order_id, snap_token, plan, amount_idr, status)
+        INSERT INTO payments (user_id, order_id, snap_token, plan, amount_idr, status)
         VALUES (%s, %s, %s, %s, %s, 'pending')
         RETURNING id
         """,
-        (user_id, order_id, snap_token, plan, amount)
+        (user_id, order_id, snap_token, plan, amount),
     )
     return row["id"]
 
 
 def settle_payment(
-    db_path: str, order_id: str, midtrans_id: str,
-    payment_type: str, raw: str
+    db_path: str,
+    order_id: str,
+    midtrans_id: str,
+    payment_type: str,
+    raw: str,
 ) -> Optional[Dict]:
-    """Update payment ke status settlement, return full row."""
-    import json
-    # raw bisa berupa JSON string — simpan sebagai JSONB
+    """Mark a payment as settled and return the full updated row, or None."""
     try:
         raw_data = json.loads(raw)
     except Exception:
@@ -139,37 +127,32 @@ def settle_payment(
         WHERE order_id = %s AND status = 'pending'
         RETURNING *
         """,
-        (midtrans_id, payment_type, json.dumps(raw_data) if isinstance(raw_data, dict) else raw, order_id)
+        (midtrans_id, payment_type, json.dumps(raw_data) if isinstance(raw_data, dict) else raw, order_id),
     )
     if not row:
         return None
+
     result = dict(row)
-    for k in ("created_at", "settled_at"):
-        if result.get(k) and hasattr(result[k], "isoformat"):
-            result[k] = result[k].isoformat()
+    for key in ("created_at", "settled_at"):
+        if result.get(key) and hasattr(result[key], "isoformat"):
+            result[key] = result[key].isoformat()
     return result
 
 
-def update_payment_status(db_path: str, order_id: str, status: str, raw: str):
-    """Update status payment (pending/deny/cancel/expire)."""
-    import json
+def update_payment_status(db_path: str, order_id: str, status: str, raw: str) -> None:
+    """Update the status of a payment record."""
     try:
         raw_data = json.loads(raw)
     except Exception:
         raw_data = raw
 
     execute_write(
-        """
-        UPDATE payments SET
-            status      = %s,
-            raw_webhook = %s::JSONB
-        WHERE order_id = %s
-        """,
-        (status, json.dumps(raw_data) if isinstance(raw_data, dict) else raw, order_id)
+        "UPDATE payments SET status = %s, raw_webhook = %s::JSONB WHERE order_id = %s",
+        (status, json.dumps(raw_data) if isinstance(raw_data, dict) else raw, order_id),
     )
 
 
 def is_pro(db_path: str, user_id: int) -> bool:
-    """Cek apakah user memiliki plan Pro yang aktif."""
+    """Return True if the user has an active Pro subscription."""
     sub = get_subscription(db_path, user_id)
     return sub.get("plan") in ("pro_monthly", "pro_annual") and sub.get("status") == "active"

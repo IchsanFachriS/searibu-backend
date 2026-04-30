@@ -1,19 +1,11 @@
-"""
-api/app.py — TPXO Tide Prediction API  v3.0.0
-Perubahan dari v2.4.0: migrasi dari SQLite ke PostgreSQL (Supabase)
+"""Searibu Marine Information API — application entry point.
 
-Semua operasi database sekarang menggunakan psycopg2 via pg_db.py.
-- auth.db     → PostgreSQL tabel users
-- luwes_raw.db → PostgreSQL tabel water_level_observations, fetch_log
-- billing.db   → PostgreSQL tabel subscriptions, payments
-- tpxo_seribu.db → TETAP SQLite (read-only, tidak perlu migrasi)
-
-Environment variables yang diperlukan:
-  DATABASE_URL        → PostgreSQL connection string (Supabase)
-  DATABASE_PATH       → Path ke tpxo_seribu.db (tetap SQLite)
-  LUWES_IMEI          → IMEI stasiun Luwes
-  MIDTRANS_SERVER_KEY → Midtrans server key
-  CORS_ORIGINS        → Allowed CORS origins
+Startup sequence:
+    1. Initialise PostgreSQL connection pool (Supabase)
+    2. Register Flask blueprints
+    3. Initialise module-level services (auth, luwes, billing, S-104)
+    4. Connect to TPXO SQLite database (read-only)
+    5. Start the Luwes background scheduler
 """
 
 import os
@@ -24,23 +16,21 @@ from pathlib import Path
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+from dotenv import load_dotenv
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.tpxo_predictor import TPXOPredictor
-from api.luwes_routes    import luwes_bp
-from api.luwes_service   import setup_luwes
-from api.luwes_db        import init_db
+from api.luwes_routes import luwes_bp
+from api.luwes_service import setup_luwes
+from api.luwes_db import init_db
 from api.luwes_scheduler import start_scheduler
-from api.auth_routes     import auth_bp, setup_auth
-from api.auth_db         import init_auth_db
-from api.s104_routes     import s104_bp, setup_s104
-from api.billing_routes  import billing_bp, setup_billing
-
-# ── PostgreSQL pool ───────────────────────────────────────────
+from api.auth_routes import auth_bp, setup_auth
+from api.auth_db import init_auth_db
+from api.s104_routes import s104_bp, setup_s104
+from api.billing_routes import billing_bp, setup_billing
 from api.pg_db import init_pool, close_pool
 
-from dotenv import load_dotenv
 load_dotenv()
 
 logging.basicConfig(
@@ -53,7 +43,6 @@ WIB = timezone(timedelta(hours=7))
 
 app = Flask(__name__)
 
-# ── CORS ──────────────────────────────────────────────────────
 _raw_origins = os.getenv(
     "CORS_ORIGINS",
     "http://localhost:5173,http://localhost:3000,https://searibu.vercel.app",
@@ -73,84 +62,57 @@ app.register_blueprint(auth_bp)
 app.register_blueprint(s104_bp)
 app.register_blueprint(billing_bp)
 
-# ── Config ────────────────────────────────────────────────────
-_repo_data  = Path(__file__).parent.parent / "data"
-DB_PATH     = os.getenv("DATABASE_PATH", str(_repo_data / "tpxo_seribu.db"))
-LUWES_IMEI  = os.getenv("LUWES_IMEI", "869556066101370")
+_repo_data = Path(__file__).parent.parent / "data"
+DB_PATH = os.getenv("DATABASE_PATH", str(_repo_data / "tpxo_seribu.db"))
+LUWES_IMEI = os.getenv("LUWES_IMEI", "869556066101370")
 
-print("=" * 65)
-print("  Searibu — TPXO Tide Prediction API  v3.0.0")
-print(f"  TPXO Database  : {DB_PATH}  (SQLite, read-only)")
-print(f"  App Database   : PostgreSQL (Supabase) via DATABASE_URL")
-print(f"  Luwes IMEI     : {LUWES_IMEI}")
-print(f"  CORS Origins   : {cors_origins}")
+logger.info("Starting Searibu API v3.0.0")
+logger.info("TPXO database : %s", DB_PATH)
+logger.info("CORS origins  : %s", cors_origins)
 
-# ── 1. Init PostgreSQL connection pool ────────────────────────
 try:
     init_pool(min_conn=1, max_conn=10)
-    print("  ✅  PostgreSQL pool terkoneksi")
-except Exception as e:
-    logger.error(f"Gagal koneksi PostgreSQL: {e}")
-    print(f"  ❌  Gagal koneksi PostgreSQL: {e}")
-    print("      Pastikan DATABASE_URL sudah diset dengan benar")
+    logger.info("PostgreSQL pool connected")
+except Exception as exc:
+    logger.error("PostgreSQL connection failed: %s", exc)
 
-# ── 2. Init modules (sekarang no-op untuk DB, tapi tetap setup service) ──
-init_db()               # no-op di PG mode
-setup_luwes("")         # luwes_service masih butuh setup (koneksi pg_db)
-init_auth_db()          # no-op di PG mode
-setup_auth()            # no-op di PG mode
+init_db()
+setup_luwes("")
+init_auth_db()
+setup_auth()
+setup_billing("")
 
-# ── 3. Billing setup ──────────────────────────────────────────
-setup_billing("")       # billing_db.py sekarang pakai pg_db
-print("  ✅  Billing module siap (PostgreSQL)")
+predictor = None
+try:
+    predictor = TPXOPredictor(DB_PATH)
+    predictor.connect()
+    logger.info("TPXO database connected")
+except FileNotFoundError:
+    logger.error("TPXO database not found: %s", DB_PATH)
+except Exception as exc:
+    logger.error("TPXO database connection failed: %s", exc)
 
-# ── 4. Scheduler ─────────────────────────────────────────────
+setup_s104(predictor, "", LUWES_IMEI)
+
 _werkzeug_reloader_child = os.environ.get("WERKZEUG_RUN_MAIN") == "false"
 if not _werkzeug_reloader_child:
     start_scheduler(db_path="", imei=LUWES_IMEI)
-    print("  ✅  Luwes Scheduler aktif (fetch tiap 60 detik)")
+    logger.info("Luwes scheduler started")
 
-# ── 5. TPXO Predictor (tetap SQLite) ─────────────────────────
-predictor = TPXOPredictor(DB_PATH)
-try:
-    predictor.connect()
-    print("  ✅  Database TPXO (SQLite) terkoneksi")
-except FileNotFoundError as e:
-    logger.error(f"Database TPXO tidak ditemukan: {e}")
-    print(f"  ❌  Database TPXO tidak ditemukan: {DB_PATH}")
-    predictor = None
-except Exception as e:
-    logger.error(f"Gagal koneksi database TPXO: {e}", exc_info=True)
-    print(f"  ❌  Gagal koneksi database TPXO: {e}")
-    predictor = None
-
-# ── 6. S-104 ──────────────────────────────────────────────────
-if predictor is not None:
-    setup_s104(predictor, "", LUWES_IMEI)
-    print("  ✅  S-104 exporter siap (IHO S-104 Ed.2.0.0)")
-else:
-    setup_s104(None, "", LUWES_IMEI)
-    print("  ⚠️   S-104 exporter nonaktif")
-
-print("=" * 65)
-
-
-# ── Graceful shutdown ─────────────────────────────────────────
 import atexit
+
 @atexit.register
 def _shutdown():
     close_pool()
-    logger.info("PostgreSQL pool ditutup saat shutdown")
+    logger.info("PostgreSQL pool closed on shutdown")
 
-
-# ── Routes (identik dengan v2.4.0) ───────────────────────────
 
 @app.route("/")
 def index():
     return jsonify({
-        "name":    "Searibu Marine Information API",
+        "name": "Searibu Marine Information API",
         "version": "3.0.0",
-        "model":   "TPXO9-atlas-v5",
+        "model": "TPXO9-atlas-v5",
         "database": "PostgreSQL (Supabase)",
         "tpxo_ready": predictor is not None,
         "standards": {
@@ -173,12 +135,11 @@ def health():
 
     if predictor is None:
         return jsonify({
-            "status":      "degraded",
-            "version":     "3.0.0",
-            "postgresql":  pg_ok,
-            "tpxo_db":     False,
-            "message":     "TPXO database tidak tersedia",
-            "luwes_scheduler": "running",
+            "status": "degraded",
+            "version": "3.0.0",
+            "postgresql": pg_ok,
+            "tpxo_db": False,
+            "message": "TPXO database unavailable",
         }), 200
 
     try:
@@ -188,19 +149,19 @@ def health():
         cursor.execute("SELECT COUNT(*) FROM harmonic_constants")
         harm_count = cursor.fetchone()[0]
         return jsonify({
-            "status":              "healthy",
-            "version":             "3.0.0",
-            "postgresql":          pg_ok,
-            "grid_points":         grid_count,
-            "harmonic_constants":  harm_count,
-            "s104_ready":          True,
+            "status": "healthy",
+            "version": "3.0.0",
+            "postgresql": pg_ok,
+            "grid_points": grid_count,
+            "harmonic_constants": harm_count,
+            "s104_ready": True,
         })
-    except Exception as e:
-        return jsonify({"status": "unhealthy", "error": str(e)}), 500
+    except Exception as exc:
+        return jsonify({"status": "unhealthy", "error": str(exc)}), 500
 
 
 def _parse_date(s: str):
-    for fmt in ["%Y-%m-%d", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S"]:
+    for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S"):
         try:
             return datetime.strptime(s, fmt).replace(tzinfo=timezone.utc)
         except ValueError:
@@ -208,137 +169,78 @@ def _parse_date(s: str):
     return None
 
 
-def _validate_lonlat(lon, lat):
-    if lon is None:
-        return None, None, ({"error": "Parameter lon diperlukan"}, 400)
-    if lat is None:
-        return None, None, ({"error": "Parameter lat diperlukan"}, 400)
-    if not (-180 <= lon <= 180):
-        return None, None, ({"error": "lon harus antara -180 dan 180"}, 400)
-    if not (-90 <= lat <= 90):
-        return None, None, ({"error": "lat harus antara -90 dan 90"}, 400)
-    return lon, lat, None
-
-
 @app.route("/api/tide/prediction")
 def get_tide_prediction():
     if predictor is None:
-        return jsonify({"error": "Database TPXO tidak tersedia."}), 503
+        return jsonify({"error": "TPXO database unavailable"}), 503
 
     try:
         lon = request.args.get("lon", type=float)
         lat = request.args.get("lat", type=float)
-        lon, lat, err = _validate_lonlat(lon, lat)
-        if err:
-            return jsonify(err[0]), err[1]
+        if lon is None:
+            return jsonify({"error": "Parameter lon is required"}), 400
+        if lat is None:
+            return jsonify({"error": "Parameter lat is required"}), 400
+        if not (-180 <= lon <= 180):
+            return jsonify({"error": "lon must be between -180 and 180"}), 400
+        if not (-90 <= lat <= 90):
+            return jsonify({"error": "lat must be between -90 and 90"}), 400
 
         now_utc = datetime.now(timezone.utc)
+
         start_date_str = request.args.get("start_date")
-        if start_date_str:
-            start_dt = _parse_date(start_date_str)
-            if start_dt is None:
-                return jsonify({"error": "Format start_date tidak valid"}), 400
-        else:
-            start_dt = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+        start_dt = _parse_date(start_date_str) if start_date_str else now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+        if start_date_str and start_dt is None:
+            return jsonify({"error": "Invalid start_date format"}), 400
 
         end_date_str = request.args.get("end_date")
-        if end_date_str:
-            end_dt = _parse_date(end_date_str)
-            if end_dt is None:
-                return jsonify({"error": "Format end_date tidak valid"}), 400
-        else:
-            end_dt = start_dt + timedelta(days=7)
-
-        interval_minutes = request.args.get("interval_minutes", type=int)
-        interval_hours   = request.args.get("interval_hours", default=1, type=int)
-
-        if interval_minutes is not None:
-            if interval_minutes < 1 or interval_minutes > 60:
-                return jsonify({"error": "interval_minutes harus 1–60"}), 400
-        else:
-            if interval_hours not in (1, 3, 6):
-                return jsonify({"error": "interval_hours harus 1, 3, atau 6"}), 400
+        end_dt = _parse_date(end_date_str) if end_date_str else start_dt + __import__("datetime").timedelta(days=7)
+        if end_date_str and end_dt is None:
+            return jsonify({"error": "Invalid end_date format"}), 400
 
         if end_dt <= start_dt:
-            return jsonify({"error": "end_date harus setelah start_date"}), 400
+            return jsonify({"error": "end_date must be after start_date"}), 400
 
-        result = predictor.predict(
+        interval_minutes = request.args.get("interval_minutes", type=int)
+        interval_hours = request.args.get("interval_hours", default=1, type=int)
+
+        if interval_minutes is not None:
+            if not (1 <= interval_minutes <= 60):
+                return jsonify({"error": "interval_minutes must be 1–60"}), 400
+        elif interval_hours not in (1, 3, 6):
+            return jsonify({"error": "interval_hours must be 1, 3, or 6"}), 400
+
+        return jsonify(predictor.predict(
             lon=lon, lat=lat,
             start_dt=start_dt, end_dt=end_dt,
             interval_hours=interval_hours,
             interval_minutes=interval_minutes,
-        )
-        return jsonify(result)
+        ))
 
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        logger.error(f"Tide prediction error: {e}", exc_info=True)
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
-
-
-@app.route("/api/tide/prediction/minute")
-def get_tide_prediction_minute():
-    if predictor is None:
-        return jsonify({"error": "Database TPXO tidak tersedia."}), 503
-
-    try:
-        lon = request.args.get("lon", type=float)
-        lat = request.args.get("lat", type=float)
-        lon, lat, err = _validate_lonlat(lon, lat)
-        if err:
-            return jsonify(err[0]), err[1]
-
-        date_str = request.args.get("date")
-        if date_str:
-            try:
-                wib_date = datetime.strptime(date_str, "%Y-%m-%d")
-            except ValueError:
-                return jsonify({"error": "Format date tidak valid (YYYY-MM-DD)"}), 400
-        else:
-            wib_date = datetime.now(WIB).replace(
-                hour=0, minute=0, second=0, microsecond=0
-            ).replace(tzinfo=None)
-
-        start_dt = datetime(
-            wib_date.year, wib_date.month, wib_date.day, 0, 0, 0, tzinfo=timezone.utc
-        ) - timedelta(hours=7)
-        end_dt = start_dt + timedelta(hours=23, minutes=59)
-
-        result = predictor.predict(
-            lon=lon, lat=lat,
-            start_dt=start_dt, end_dt=end_dt,
-            interval_minutes=1,
-        )
-        result["wib_info"] = {
-            "wib_date":  wib_date.strftime("%Y-%m-%d"),
-            "utc_start": start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "utc_end":   end_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        }
-        return jsonify(result)
-
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        logger.error(f"Tide minute prediction error: {e}", exc_info=True)
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        logger.error("Tide prediction error: %s", exc, exc_info=True)
+        return jsonify({"error": f"Internal server error: {exc}"}), 500
 
 
 @app.errorhandler(404)
-def not_found(e):
-    return jsonify({"error": "Endpoint tidak ditemukan"}), 404
+def not_found(_):
+    return jsonify({"error": "Endpoint not found"}), 404
+
 
 @app.errorhandler(405)
-def method_not_allowed(e):
-    return jsonify({"error": "Method tidak diizinkan"}), 405
+def method_not_allowed(_):
+    return jsonify({"error": "Method not allowed"}), 405
+
 
 @app.errorhandler(500)
-def internal_error(e):
+def internal_error(_):
     return jsonify({"error": "Internal server error"}), 500
 
 
 if __name__ == "__main__":
-    port  = int(os.getenv("PORT", 5000))
+    port = int(os.getenv("PORT", 5000))
     debug = os.getenv("FLASK_DEBUG", "False").lower() == "true"
-    print(f"\n🚀  Server berjalan di http://localhost:{port}")
+    logger.info("Running on http://localhost:%d", port)
     app.run(host="0.0.0.0", port=port, debug=debug)
