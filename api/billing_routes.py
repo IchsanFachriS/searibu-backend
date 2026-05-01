@@ -34,7 +34,7 @@ _billing_db: str | None = None
 _mt_server_key: str | None = None
 _mt_is_production: bool = False
 
-_PRO_ONLY_FEATURES = {"s104_export", "forecast_14d", "activity_full", "luwes_overlay"}
+_PRO_ONLY_FEATURES = {"forecast_14d", "activity_full", "luwes_overlay"}
 
 
 def setup_billing(db_path: str) -> None:
