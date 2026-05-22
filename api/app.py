@@ -1,12 +1,4 @@
-"""Searibu Marine Information API — application entry point.
-
-Startup sequence:
-    1. Initialise PostgreSQL connection pool (Supabase)
-    2. Register Flask blueprints
-    3. Initialise module-level services (auth, luwes, billing, S-104)
-    4. Connect to TPXO SQLite database (read-only)
-    5. Start the Luwes background scheduler
-"""
+"""Searibu Marine Information API — application entry point."""
 
 import os
 import sys
@@ -21,15 +13,17 @@ from dotenv import load_dotenv
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.tpxo_predictor import TPXOPredictor
-from api.luwes_routes import luwes_bp
-from api.luwes_service import setup_luwes
-from api.luwes_db import init_db
+from api.luwes_routes    import luwes_bp
+from api.luwes_service   import setup_luwes
+from api.luwes_db        import init_db
 from api.luwes_scheduler import start_scheduler
-from api.auth_routes import auth_bp, setup_auth
-from api.auth_db import init_auth_db
-from api.s104_routes import s104_bp, setup_s104
-from api.billing_routes import billing_bp, setup_billing
-from api.pg_db import init_pool, close_pool
+from api.auth_routes     import auth_bp, setup_auth
+from api.auth_db         import init_auth_db
+from api.s104_routes     import s104_bp, setup_s104
+from api.billing_routes  import billing_bp, setup_billing
+from api.profile_routes  import profile_bp
+from api.admin_routes    import admin_bp          # NEW
+from api.pg_db           import init_pool, close_pool
 
 load_dotenv()
 
@@ -51,9 +45,9 @@ cors_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
 CORS(
     app,
     resources={r"/api/*": {
-        "origins": cors_origins,
-        "methods": ["GET", "POST", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization"],
+        "origins":      cors_origins,
+        "methods":      ["GET", "POST", "PUT", "OPTIONS"],
+        "allow_headers":["Content-Type", "Authorization"],
     }},
 )
 
@@ -61,12 +55,14 @@ app.register_blueprint(luwes_bp)
 app.register_blueprint(auth_bp)
 app.register_blueprint(s104_bp)
 app.register_blueprint(billing_bp)
+app.register_blueprint(profile_bp)
+app.register_blueprint(admin_bp)                  # NEW
 
 _repo_data = Path(__file__).parent.parent / "data"
-DB_PATH = os.getenv("DATABASE_PATH", str(_repo_data / "tpxo_seribu.db"))
+DB_PATH    = os.getenv("DATABASE_PATH", str(_repo_data / "tpxo_seribu.db"))
 LUWES_IMEI = os.getenv("LUWES_IMEI", "869556066101370")
 
-logger.info("Starting Searibu API v3.0.0")
+logger.info("Starting Searibu API v3.2.0")
 logger.info("TPXO database : %s", DB_PATH)
 logger.info("CORS origins  : %s", cors_origins)
 
@@ -110,10 +106,10 @@ def _shutdown():
 @app.route("/")
 def index():
     return jsonify({
-        "name": "Searibu Marine Information API",
-        "version": "3.0.0",
-        "model": "TPXO9-atlas-v5",
-        "database": "PostgreSQL (Supabase)",
+        "name":      "Searibu Marine Information API",
+        "version":   "3.2.0",
+        "model":     "TPXO9-atlas-v5",
+        "database":  "PostgreSQL (Supabase)",
         "tpxo_ready": predictor is not None,
         "standards": {
             "S-100": "IHO Universal Hydrographic Data Model Ed.5.2.0",
@@ -135,11 +131,11 @@ def health():
 
     if predictor is None:
         return jsonify({
-            "status": "degraded",
-            "version": "3.0.0",
+            "status":    "degraded",
+            "version":   "3.2.0",
             "postgresql": pg_ok,
-            "tpxo_db": False,
-            "message": "TPXO database unavailable",
+            "tpxo_db":   False,
+            "message":   "TPXO database unavailable",
         }), 200
 
     try:
@@ -149,12 +145,12 @@ def health():
         cursor.execute("SELECT COUNT(*) FROM harmonic_constants")
         harm_count = cursor.fetchone()[0]
         return jsonify({
-            "status": "healthy",
-            "version": "3.0.0",
-            "postgresql": pg_ok,
-            "grid_points": grid_count,
+            "status":             "healthy",
+            "version":            "3.2.0",
+            "postgresql":         pg_ok,
+            "grid_points":        grid_count,
             "harmonic_constants": harm_count,
-            "s104_ready": True,
+            "s104_ready":         True,
         })
     except Exception as exc:
         return jsonify({"status": "unhealthy", "error": str(exc)}), 500
@@ -189,12 +185,18 @@ def get_tide_prediction():
         now_utc = datetime.now(timezone.utc)
 
         start_date_str = request.args.get("start_date")
-        start_dt = _parse_date(start_date_str) if start_date_str else now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+        start_dt = (
+            _parse_date(start_date_str) if start_date_str
+            else now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+        )
         if start_date_str and start_dt is None:
             return jsonify({"error": "Invalid start_date format"}), 400
 
         end_date_str = request.args.get("end_date")
-        end_dt = _parse_date(end_date_str) if end_date_str else start_dt + __import__("datetime").timedelta(days=7)
+        end_dt = (
+            _parse_date(end_date_str) if end_date_str
+            else start_dt + __import__("datetime").timedelta(days=7)
+        )
         if end_date_str and end_dt is None:
             return jsonify({"error": "Invalid end_date format"}), 400
 
@@ -202,11 +204,11 @@ def get_tide_prediction():
             return jsonify({"error": "end_date must be after start_date"}), 400
 
         interval_minutes = request.args.get("interval_minutes", type=int)
-        interval_hours = request.args.get("interval_hours", default=1, type=int)
+        interval_hours   = request.args.get("interval_hours", default=1, type=int)
 
         if interval_minutes is not None:
             if not (1 <= interval_minutes <= 60):
-                return jsonify({"error": "interval_minutes must be 1–60"}), 400
+                return jsonify({"error": "interval_minutes must be 1-60"}), 400
         elif interval_hours not in (1, 3, 6):
             return jsonify({"error": "interval_hours must be 1, 3, or 6"}), 400
 
@@ -228,11 +230,9 @@ def get_tide_prediction():
 def not_found(_):
     return jsonify({"error": "Endpoint not found"}), 404
 
-
 @app.errorhandler(405)
 def method_not_allowed(_):
     return jsonify({"error": "Method not allowed"}), 405
-
 
 @app.errorhandler(500)
 def internal_error(_):
@@ -240,7 +240,7 @@ def internal_error(_):
 
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 5000))
+    port  = int(os.getenv("PORT", 5000))
     debug = os.getenv("FLASK_DEBUG", "False").lower() == "true"
     logger.info("Running on http://localhost:%d", port)
     app.run(host="0.0.0.0", port=port, debug=debug)
