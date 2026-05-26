@@ -1,10 +1,7 @@
 """Billing database operations (PostgreSQL).
 
-Tables managed:
-    subscriptions — user plan and expiry
-    payments      — Midtrans payment records
-
-Schema is created via migrations/001_initial_schema.sql.
+FIX: upsert_subscription menggunakan (%s * INTERVAL '1 day') 
+     mengganti INTERVAL '%s days' yang tidak bisa disubstitusi psycopg2.
 """
 
 import json
@@ -19,21 +16,15 @@ WIB = timezone(timedelta(hours=7))
 
 PLAN_CONFIG = {
     "pro_monthly": {"amount": 39_000, "days": 30},
-    "pro_annual": {"amount": 139_000, "days": 365},
+    "pro_annual":  {"amount": 139_000, "days": 365},
 }
 
 
 def init_billing_db(db_path: str = None) -> None:
-    """No-op — kept for backward-compatibility with app.py startup sequence."""
     logger.debug("billing_db: PostgreSQL mode — schema managed via migration SQL")
 
 
 def get_subscription(db_path: str, user_id: int) -> Dict:
-    """Return the subscription record for a user.
-
-    Falls back to a default free-plan dict if no record exists.
-    Auto-expires the subscription in the database if expires_at has passed.
-    """
     row = execute_one("SELECT * FROM subscriptions WHERE user_id = %s", (user_id,))
     if not row:
         return {"plan": "free", "status": "active", "expires_at": None, "user_id": user_id}
@@ -59,20 +50,31 @@ def get_subscription(db_path: str, user_id: int) -> Dict:
 
 
 def upsert_subscription(db_path: str, user_id: int, plan: str, days: int) -> Dict:
-    """Insert or update a subscription for the given user."""
+    """Insert or update subscription.
+
+    FIX: menggunakan (%s * INTERVAL '1 day') bukan INTERVAL '%s days'
+    karena psycopg2 tidak mensubstitusi %s di dalam string literal SQL.
+    """
     row = execute_returning(
         """
         INSERT INTO subscriptions (user_id, plan, status, starts_at, expires_at, updated_at)
-        VALUES (%s, %s, 'active', NOW(), NOW() + INTERVAL '%s days', NOW())
+        VALUES (
+            %s, %s, 'active',
+            NOW(),
+            NOW() + (%s * INTERVAL '1 day'),
+            NOW()
+        )
         ON CONFLICT (user_id) DO UPDATE SET
             plan       = EXCLUDED.plan,
             status     = 'active',
             starts_at  = EXCLUDED.starts_at,
             expires_at = EXCLUDED.expires_at,
             updated_at = EXCLUDED.updated_at
-        RETURNING plan, status,
-                  starts_at  AT TIME ZONE 'UTC' AS starts_at,
-                  expires_at AT TIME ZONE 'UTC' AS expires_at
+        RETURNING
+            plan,
+            status,
+            starts_at  AT TIME ZONE 'UTC' AS starts_at,
+            expires_at AT TIME ZONE 'UTC' AS expires_at
         """,
         (user_id, plan, days),
     )
@@ -91,7 +93,6 @@ def create_payment(
     plan: str,
     amount: int,
 ) -> int:
-    """Insert a new pending payment record and return its id."""
     row = execute_returning(
         """
         INSERT INTO payments (user_id, order_id, snap_token, plan, amount_idr, status)
@@ -110,7 +111,6 @@ def settle_payment(
     payment_type: str,
     raw: str,
 ) -> Optional[Dict]:
-    """Mark a payment as settled and return the full updated row, or None."""
     try:
         raw_data = json.loads(raw)
     except Exception:
@@ -140,7 +140,6 @@ def settle_payment(
 
 
 def update_payment_status(db_path: str, order_id: str, status: str, raw: str) -> None:
-    """Update the status of a payment record."""
     try:
         raw_data = json.loads(raw)
     except Exception:
@@ -153,6 +152,5 @@ def update_payment_status(db_path: str, order_id: str, status: str, raw: str) ->
 
 
 def is_pro(db_path: str, user_id: int) -> bool:
-    """Return True if the user has an active Pro subscription."""
     sub = get_subscription(db_path, user_id)
     return sub.get("plan") in ("pro_monthly", "pro_annual") and sub.get("status") == "active"
