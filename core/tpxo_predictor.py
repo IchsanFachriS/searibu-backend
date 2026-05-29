@@ -1,4 +1,4 @@
-"""TPXO9 harmonic tide predictor.
+"""TPXO10 harmonic tide predictor.
 
 Implements the standard tidal harmonic summation formula:
 
@@ -6,8 +6,8 @@ Implements the standard tidal harmonic summation formula:
 
 where
     ω_k   = angular speed of constituent k (°/hour)
-    A_k   = amplitude (m) from the TPXO9 database
-    κ_k   = Greenwich phase lag (°) from the TPXO9 database
+    A_k   = amplitude (m) from the TPXO10 database
+    κ_k   = Greenwich phase lag (°) from the TPXO10 database
     f_k   = nodal amplitude correction factor
     V₀_k  = astronomical equilibrium argument at reference epoch t₀
     u_k   = nodal phase correction (°)
@@ -69,10 +69,14 @@ SPEED: Dict[str, float] = {
     "s1":   _T,
 }
 
-TPXO9_CONS: List[str] = [
+# 15 constituents used in Searibu (same set as TPXO9 for compatibility)
+TPXO_CONS: List[str] = [
     "2n2", "k1", "k2", "m2", "m4", "mf", "mm",
     "mn4", "ms4", "n2", "o1", "p1", "q1", "s1", "s2",
 ]
+
+# Backward-compatible alias
+TPXO9_CONS = TPXO_CONS
 
 _JD_J1900 = 2415020.0
 MAX_POINTS_PER_REQUEST = 527_040
@@ -95,10 +99,7 @@ def hours_since_j1900(dt: datetime) -> float:
 
 
 def astronomical_args(dt: datetime) -> Dict[str, float]:
-    """Compute mean astronomical longitudes at dt (Schureman 1958, Table 1).
-
-    Returns degrees for: s, h, p, N (ascending node), p1 (Sun's perigee).
-    """
+    """Compute mean astronomical longitudes at dt (Schureman 1958, Table 1)."""
     T = (julian_day(dt) - _JD_J1900) / 36525.0
     return {
         "s":  (277.0247 + 481267.8906 * T) % 360.0,
@@ -110,7 +111,7 @@ def astronomical_args(dt: datetime) -> Dict[str, float]:
 
 
 def equilibrium_arguments(astro: Dict[str, float]) -> Dict[str, float]:
-    """Compute V₀ equilibrium arguments from astronomical longitudes (Schureman 1958)."""
+    """Compute V₀ equilibrium arguments (Schureman 1958)."""
     s, h, p, N, p1 = astro["s"], astro["h"], astro["p"], astro["N"], astro["p1"]
     V0 = {
         "m2":   (2*h - 2*s)             % 360.0,
@@ -145,15 +146,8 @@ def equilibrium_arguments(astro: Dict[str, float]) -> Dict[str, float]:
 
 
 def nodal_corrections(N_deg: float) -> Tuple[Dict[str, float], Dict[str, float]]:
-    """Compute nodal amplitude (f) and phase (u) corrections (Schureman 1958 / Foreman 1977).
-
-    Args:
-        N_deg: longitude of Moon's ascending node in degrees.
-
-    Returns:
-        (f, u) — dicts of amplitude factors and phase corrections (°).
-    """
-    Nr = math.radians(N_deg)
+    """Compute nodal amplitude (f) and phase (u) corrections (Schureman 1958 / Foreman 1977)."""
+    Nr  = math.radians(N_deg)
     N2r = math.radians(2.0 * N_deg)
 
     def _atan2d(y, x):
@@ -161,28 +155,28 @@ def nodal_corrections(N_deg: float) -> Tuple[Dict[str, float], Dict[str, float]]
 
     fM2_x = 1.0 - 0.03731 * math.cos(Nr) + 0.00052 * math.cos(N2r)
     fM2_y = 0.03731 * math.sin(Nr) - 0.00052 * math.sin(N2r)
-    f_M2 = math.hypot(fM2_x, fM2_y)
-    u_M2 = _atan2d(-fM2_y, fM2_x)
+    f_M2  = math.hypot(fM2_x, fM2_y)
+    u_M2  = _atan2d(-fM2_y, fM2_x)
 
     fK2_x = 1.0 + 0.2852 * math.cos(Nr) + 0.0324 * math.cos(N2r)
     fK2_y = 0.3108 * math.sin(Nr) + 0.0328 * math.sin(N2r)
-    f_K2 = math.hypot(fK2_x, fK2_y)
-    u_K2 = _atan2d(-fK2_y, fK2_x)
+    f_K2  = math.hypot(fK2_x, fK2_y)
+    u_K2  = _atan2d(-fK2_y, fK2_x)
 
     fK1_x = 1.0 + 0.1158 * math.cos(Nr) - 0.0029 * math.cos(N2r)
     fK1_y = 0.1554 * math.sin(Nr) - 0.0029 * math.sin(N2r)
-    f_K1 = math.hypot(fK1_x, fK1_y)
-    u_K1 = _atan2d(-fK1_y, fK1_x)
+    f_K1  = math.hypot(fK1_x, fK1_y)
+    u_K1  = _atan2d(-fK1_y, fK1_x)
 
     fO1_x = 1.0 - 0.10980 * math.cos(Nr) + 0.00148 * math.cos(N2r)
     fO1_y = 0.10980 * math.sin(Nr) - 0.00148 * math.sin(N2r)
-    f_O1 = math.hypot(fO1_x, fO1_y)
-    u_O1 = _atan2d(-fO1_y, fO1_x)
+    f_O1  = math.hypot(fO1_x, fO1_y)
+    u_O1  = _atan2d(-fO1_y, fO1_x)
 
     fMf_x = 1.0 - 0.15636 * math.cos(Nr)
     fMf_y = 0.15636 * math.sin(Nr)
-    f_Mf = math.hypot(fMf_x, fMf_y)
-    u_Mf = _atan2d(-fMf_y, fMf_x)
+    f_Mf  = math.hypot(fMf_x, fMf_y)
+    u_Mf  = _atan2d(-fMf_y, fMf_x)
 
     f_Mm = 1.0 - 0.13023 * math.cos(Nr)
 
@@ -215,14 +209,11 @@ def predict_harmonic(
     f_dict: Dict[str, float],
     u_dict: Dict[str, float],
 ) -> np.ndarray:
-    """Vectorised harmonic summation over TPXO9_CONS constituents.
-
-    Returns sea level in metres for each time in t_rel_hours.
-    """
+    """Vectorised harmonic summation over TPXO_CONS constituents."""
     h = np.zeros(len(t_rel_hours), dtype=np.float64)
-    for name in TPXO9_CONS:
-        A = amp.get(name, 0.0)
-        k = kappa.get(name, 0.0)
+    for name in TPXO_CONS:
+        A     = amp.get(name, 0.0)
+        k     = kappa.get(name, 0.0)
         omega = SPEED.get(name)
         if A < 1e-7 or math.isnan(A) or math.isnan(k) or omega is None:
             continue
@@ -232,7 +223,10 @@ def predict_harmonic(
 
 
 class TPXOPredictor:
-    """Tide predictor backed by the TPXO9-atlas-v5 SQLite database.
+    """Tide predictor backed by the TPXO10-atlas-v2 SQLite database.
+
+    The SQLite database is generated by scripts/preprocess_tpxo10.py from the
+    TPXO10-atlas-v2 per-constituent NetCDF files.
 
     Usage:
         predictor = TPXOPredictor("data/tpxo_seribu.db")
@@ -264,7 +258,7 @@ class TPXOPredictor:
         self.close()
 
     def find_nearest_grid(self, lon: float, lat: float) -> Dict:
-        cur = self.conn.cursor()
+        cur  = self.conn.cursor()
         cur.execute("SELECT id, lon, lat FROM grid_points")
         rows = cur.fetchall()
         if not rows:
@@ -275,7 +269,7 @@ class TPXOPredictor:
             d = self._haversine(lon, lat, row["lon"], row["lat"])
             if d < best_d:
                 best_d = d
-                best = dict(row)
+                best   = dict(row)
                 best["distance_km"] = d
         return best
 
@@ -292,7 +286,10 @@ class TPXOPredictor:
         )
         result: Dict[str, Dict[str, float]] = {}
         for row in cur.fetchall():
-            result[row["name"].lower()] = {"amplitude": float(row["amplitude"]), "phase": float(row["phase"])}
+            result[row["name"].lower()] = {
+                "amplitude": float(row["amplitude"]),
+                "phase":     float(row["phase"]),
+            }
         return result
 
     def predict(
@@ -334,28 +331,30 @@ class TPXOPredictor:
         total_h = (end_dt - start_dt).total_seconds() / 3600.0
         n_steps = int(round(total_h / dt_hours)) + 1
         if n_steps > MAX_POINTS_PER_REQUEST:
-            raise ValueError(f"Too many prediction points ({n_steps:,}); maximum is {MAX_POINTS_PER_REQUEST:,}")
+            raise ValueError(
+                f"Too many prediction points ({n_steps:,}); maximum is {MAX_POINTS_PER_REQUEST:,}"
+            )
 
-        grid = self.find_nearest_grid(lon, lat)
+        grid      = self.find_nearest_grid(lon, lat)
         harmonics = self.get_harmonics(grid["id"])
         if not harmonics:
             raise ValueError(f"No harmonic data for grid point {grid['id']}")
 
-        amp = {n: harmonics.get(n, {}).get("amplitude", 0.0) for n in TPXO9_CONS}
-        kappa = {n: harmonics.get(n, {}).get("phase", 0.0) for n in TPXO9_CONS}
+        amp   = {n: harmonics.get(n, {}).get("amplitude", 0.0) for n in TPXO_CONS}
+        kappa = {n: harmonics.get(n, {}).get("phase",     0.0) for n in TPXO_CONS}
 
         astro_t0 = astronomical_args(start_dt.replace(tzinfo=None))
-        V0 = equilibrium_arguments(astro_t0)
+        V0       = equilibrium_arguments(astro_t0)
 
-        t_mid = (start_dt + timedelta(hours=total_h / 2.0)).replace(tzinfo=None)
+        t_mid  = (start_dt + timedelta(hours=total_h / 2.0)).replace(tzinfo=None)
         f_dict, u_dict = nodal_corrections(astronomical_args(t_mid)["N"])
 
-        t_rel = np.arange(n_steps, dtype=np.float64) * dt_hours
+        t_rel  = np.arange(n_steps, dtype=np.float64) * dt_hours
         h_pred = predict_harmonic(t_rel, amp, kappa, V0, f_dict, u_dict)
 
         predictions = [
             {
-                "time": (start_dt + timedelta(hours=float(t_rel[i]))).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "time":   (start_dt + timedelta(hours=float(t_rel[i]))).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "height": round(float(h_pred[i]), 4),
             }
             for i in range(n_steps)
@@ -364,43 +363,43 @@ class TPXOPredictor:
         return {
             "request": {
                 "lon": lon, "lat": lat,
-                "start_time": start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "end_time": end_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "interval_hours": dt_hours,
+                "start_time":       start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "end_time":         end_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "interval_hours":   dt_hours,
                 "interval_minutes": interval_minutes,
-                "n_points": n_steps,
+                "n_points":         n_steps,
             },
             "grid": {
-                "id": grid["id"],
-                "lon": round(grid["lon"], 6),
-                "lat": round(grid["lat"], 6),
+                "id":          grid["id"],
+                "lon":         round(grid["lon"], 6),
+                "lat":         round(grid["lat"], 6),
                 "distance_km": round(grid["distance_km"], 3),
             },
             "predictions": predictions,
             "statistics": {
-                "max": round(float(np.max(h_pred)), 4),
-                "min": round(float(np.min(h_pred)), 4),
-                "mean": round(float(np.mean(h_pred)), 4),
+                "max":   round(float(np.max(h_pred)),  4),
+                "min":   round(float(np.min(h_pred)),  4),
+                "mean":  round(float(np.mean(h_pred)), 4),
                 "range": round(float(np.max(h_pred) - np.min(h_pred)), 4),
             },
             "metadata": {
-                "model": "TPXO9-atlas-v5",
-                "method": "Harmonic Analysis — Schureman (1958) / OTIS formulation",
-                "datum": "MSL (Mean Sea Level)",
-                "timezone": "UTC",
-                "constituents": TPXO9_CONS,
-                "n_constituents": len(TPXO9_CONS),
-                "nodal_epoch": t_mid.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "reference_epoch": "J1900.0 (JD 2415020.0)",
+                "model":            "TPXO10-atlas-v2",
+                "method":           "Harmonic Analysis — Schureman (1958) / OTIS formulation",
+                "datum":            "MSL (Mean Sea Level)",
+                "timezone":         "UTC",
+                "constituents":     TPXO_CONS,
+                "n_constituents":   len(TPXO_CONS),
+                "nodal_epoch":      t_mid.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "reference_epoch":  "J1900.0 (JD 2415020.0)",
             },
         }
 
     @staticmethod
     def _haversine(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
-        R = 6371.0
+        R    = 6371.0
         dlat = math.radians(lat2 - lat1)
         dlon = math.radians(lon2 - lon1)
-        a = (math.sin(dlat / 2) ** 2
-             + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2))
-             * math.sin(dlon / 2) ** 2)
+        a    = (math.sin(dlat / 2) ** 2
+                + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2))
+                * math.sin(dlon / 2) ** 2)
         return R * 2.0 * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))

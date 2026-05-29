@@ -76,7 +76,7 @@ def export_s104_tpxo(
     date_str: str,
     output_path: Optional[str] = None,
 ) -> str:
-    """Export TPXO9 astronomical predictions as an IHO S-104 Ed. 2.0.0 HDF5 file.
+    """Export TPXO10 astronomical predictions as an IHO S-104 Ed. 2.0.0 HDF5 file.
 
     Args:
         predictions:      list of {time: ISO8601 UTC, height: float (m)}.
@@ -126,7 +126,7 @@ def export_s104_tpxo(
             "producer": "Searibu — ITB Geodesy and Geomatics Engineering",
             "datasetDeliveryInterval": "PT1H",
             "waterLevelTrendThreshold": TREND_THRESHOLD,
-            "metaFeatures": "tpxo9-atlas-v5; harmonicPrediction",
+            "metaFeatures": "tpxo10-atlas-v2; harmonicPrediction",
         })
 
         gf = hdf.create_group("Group_F")
@@ -256,7 +256,7 @@ def export_s104_luwes(
         if apply_tol:
             hdf.attrs["verticalDatumCorrectionFactor"] = TOL_CORRECTION_M
             hdf.attrs["verticalDatumCorrectionDescription"] = (
-                f"Transfer of Level (TOL): Luwes station corrected to MSL TPXO9-atlas-v5. "
+                f"Transfer of Level (TOL): Luwes station corrected to MSL TPXO10-atlas-v2. "
                 f"Correction: {TOL_CORRECTION_M} m"
             )
 

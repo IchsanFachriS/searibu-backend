@@ -20,7 +20,7 @@ from api.luwes_scheduler import start_scheduler
 from api.auth_routes     import auth_bp, setup_auth
 from api.auth_db         import init_auth_db
 from api.s104_routes     import s104_bp, setup_s104
-from api.billing_routes_dummy  import billing_bp, setup_billing
+from api.billing_routes  import billing_bp, setup_billing
 from api.profile_routes  import profile_bp
 from api.pg_db           import init_pool, close_pool
 
@@ -60,7 +60,7 @@ _repo_data = Path(__file__).parent.parent / "data"
 DB_PATH    = os.getenv("DATABASE_PATH", str(_repo_data / "tpxo_seribu.db"))
 LUWES_IMEI = os.getenv("LUWES_IMEI", "869556066101370")
 
-logger.info("Starting Searibu API v3.2.0")
+logger.info("Starting Searibu API v3.3.0")
 logger.info("TPXO database : %s", DB_PATH)
 logger.info("CORS origins  : %s", cors_origins)
 
@@ -105,8 +105,8 @@ def _shutdown():
 def index():
     return jsonify({
         "name":      "Searibu Marine Information API",
-        "version":   "3.2.0",
-        "model":     "TPXO9-atlas-v5",
+        "version":   "3.3.0",
+        "model":     "TPXO10-atlas-v2",
         "database":  "PostgreSQL (Supabase)",
         "tpxo_ready": predictor is not None,
         "standards": {
@@ -130,7 +130,7 @@ def health():
     if predictor is None:
         return jsonify({
             "status":    "degraded",
-            "version":   "3.2.0",
+            "version":   "3.3.0",
             "postgresql": pg_ok,
             "tpxo_db":   False,
             "message":   "TPXO database unavailable",

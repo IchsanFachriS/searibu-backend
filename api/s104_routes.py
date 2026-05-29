@@ -174,7 +174,7 @@ def s104_json():
                 "dataDynamicity": 1,
                 "dataDynamicityLabel": "astronomicalPrediction",
                 "producer": "Searibu — ITB Geodesy and Geomatics Engineering",
-                "model": "TPXO9-atlas-v5",
+                "model": "TPXO10-atlas-v2",
                 "method": "Harmonic Analysis (Schureman 1958, Foreman 1977)",
                 "constituents": result.get("metadata", {}).get("n_constituents", 15),
                 "references": ["IHO S-100 Ed.5.2.0 (2024)", "IHO S-104 Ed.2.0.0 (2024)"],
@@ -242,7 +242,7 @@ def s104_metadata():
             "tpxo": {
                 "type": "astronomicalPrediction",
                 "dataDynamicity": 1,
-                "model": "TPXO9-atlas-v5 (Oregon State University)",
+                "model": "TPXO10-atlas-v2 (Oregon State University)",
                 "constituents": 15,
                 "interval": "PT1H",
             },
