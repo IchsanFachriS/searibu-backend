@@ -22,7 +22,6 @@ from api.auth_db         import init_auth_db
 from api.s104_routes     import s104_bp, setup_s104
 from api.billing_routes_dummy  import billing_bp, setup_billing
 from api.profile_routes  import profile_bp
-from api.admin_routes    import admin_bp         
 from api.pg_db           import init_pool, close_pool
 
 load_dotenv()
@@ -56,7 +55,6 @@ app.register_blueprint(auth_bp)
 app.register_blueprint(s104_bp)
 app.register_blueprint(billing_bp)
 app.register_blueprint(profile_bp)
-app.register_blueprint(admin_bp)
 
 _repo_data = Path(__file__).parent.parent / "data"
 DB_PATH    = os.getenv("DATABASE_PATH", str(_repo_data / "tpxo_seribu.db"))
