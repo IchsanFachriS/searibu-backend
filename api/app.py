@@ -179,6 +179,20 @@ def get_tide_prediction():
             return jsonify({"error": "lon must be between -180 and 180"}), 400
         if not (-90 <= lat <= 90):
             return jsonify({"error": "lat must be between -90 and 90"}), 400
+        
+        # ── Validasi bounding box Kepulauan Seribu ────────────────────────
+        SERIBU_LON_MIN, SERIBU_LON_MAX = 106.0, 107.0
+        SERIBU_LAT_MIN, SERIBU_LAT_MAX = -6.3, -5.0
+        if not (SERIBU_LON_MIN <= lon <= SERIBU_LON_MAX and
+                SERIBU_LAT_MIN <= lat <= SERIBU_LAT_MAX):
+            return jsonify({
+                "error": (
+                    f"Coordinates ({lat:.4f}°, {lon:.4f}°) are outside the "
+                    f"Searibu service area. Valid range: "
+                    f"lon [{SERIBU_LON_MIN}, {SERIBU_LON_MAX}], "
+                    f"lat [{SERIBU_LAT_MIN}, {SERIBU_LAT_MAX}]."
+                )
+            }), 400
 
         now_utc = datetime.now(timezone.utc)
 
